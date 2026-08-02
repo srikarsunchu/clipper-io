@@ -1,91 +1,226 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 
-type View = "campaign" | "brief" | "clips" | "revenue";
-type Candidate = { id: number; title: string; hook: string; transcript: string; duration: string; score: number; predicted: string; payout: string; retention: number; risk: "Ready" | "Review"; accent: string };
+type Tool = "media" | "captions" | "broll" | "audio" | "elements" | "ai";
+type Layout = "focus" | "split" | "gameplay";
+type CaptionStyle = "pop" | "clean" | "boxed" | "karaoke";
+type Inspector = "clip" | "style" | "adjust";
 
-const candidates: Candidate[] = [
-  { id: 1, title: "The $0-to-$10K truth", hook: "I wasted 2 years building the wrong way.", transcript: "Everyone thinks the breakthrough was the product. It wasn't. The breakthrough was learning how to distribute before I built...", duration: "00:34", score: 96, predicted: "48K–92K", payout: "$144–$276", retention: 78, risk: "Ready", accent: "lime" },
-  { id: 2, title: "Build distribution first", hook: "Your first 1,000 users are already somewhere.", transcript: "You don't need another feature. Find the room where your customer already spends attention, then earn the right to redirect it...", duration: "00:29", score: 91, predicted: "31K–64K", payout: "$93–$192", retention: 72, risk: "Ready", accent: "violet" },
-  { id: 3, title: "The founder bottleneck", hook: "Most founders don't have a growth problem.", transcript: "If every decision still has to go through you, growth only makes the bottleneck more expensive. The answer is a repeatable system...", duration: "00:42", score: 84, predicted: "22K–45K", payout: "$66–$135", retention: 66, risk: "Review", accent: "orange" },
+const tools: { id: Tool; icon: string; label: string }[] = [
+  { id: "media", icon: "▧", label: "Media" },
+  { id: "captions", icon: "CC", label: "Captions" },
+  { id: "broll", icon: "◫", label: "B-roll" },
+  { id: "audio", icon: "♫", label: "Audio" },
+  { id: "elements", icon: "◇", label: "Elements" },
+  { id: "ai", icon: "✦", label: "AI edit" },
 ];
 
-const navItems: { id: View; label: string; glyph: string }[] = [
-  { id: "campaign", label: "Campaign desk", glyph: "⌁" }, { id: "brief", label: "Brief compiler", glyph: "◎" }, { id: "clips", label: "Clip lab", glyph: "✦" }, { id: "revenue", label: "Revenue plan", glyph: "↗" },
+const captionStyles: { id: CaptionStyle; label: string; sample: string }[] = [
+  { id: "pop", label: "Pop", sample: "BIG IDEA" },
+  { id: "clean", label: "Clean", sample: "Big idea" },
+  { id: "boxed", label: "Boxed", sample: "BIG IDEA" },
+  { id: "karaoke", label: "Karaoke", sample: "Big idea" },
 ];
-const hardRules = [["Duration", "25–45 seconds"], ["Platforms", "TikTok + Instagram Reels"], ["Required", "Animated captions · @AmbroHQ · #buildinpublic"], ["Avoid", "Income guarantees · profanity · competitor logos"]];
-const checks = [["Length is inside 25–45s", "pass"], ["Creator handle appears on screen", "pass"], ["Required hashtag in post copy", "pass"], ["No income or outcome guarantee", "pass"], ["Original pacing and caption treatment", "pass"], ["Source rights require final confirmation", "warn"]];
 
-export default function Home() {
-  const [view, setView] = useState<View>("campaign");
-  const [campaignUrl, setCampaignUrl] = useState("https://whop.com/discover/ambro-founder-clips");
-  const [compiled, setCompiled] = useState(true);
-  const [selectedId, setSelectedId] = useState(1);
-  const [sourceName, setSourceName] = useState("Ambro founder interview — Episode 12.mp4");
-  const [toast, setToast] = useState("");
+const transcript = [
+  ["00:00", "The biggest mistake I made was building before I understood distribution."],
+  ["00:04", "I spent two years polishing a product nobody knew existed."],
+  ["00:09", "Then I flipped the order: audience first, product second."],
+  ["00:14", "That one change made every launch after it easier."],
+];
+
+export default function Editor() {
+  const [tool, setTool] = useState<Tool>("media");
+  const [layout, setLayout] = useState<Layout>("split");
+  const [captionStyle, setCaptionStyle] = useState<CaptionStyle>("pop");
+  const [inspector, setInspector] = useState<Inspector>("clip");
   const [playing, setPlaying] = useState(false);
-  const [captionStyle, setCaptionStyle] = useState<"Punch" | "Clean" | "Karaoke">("Punch");
+  const [currentTime, setCurrentTime] = useState(7.42);
+  const [muted, setMuted] = useState(false);
+  const [zoom, setZoom] = useState(72);
+  const [sourceName, setSourceName] = useState("Founder_Podcast_Ep12.mp4");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [selectedLayer, setSelectedLayer] = useState("video");
+  const [showExport, setShowExport] = useState(false);
+  const [renderProgress, setRenderProgress] = useState(0);
+  const [toast, setToast] = useState("");
+  const [captionsOn, setCaptionsOn] = useState(true);
+  const [blur, setBlur] = useState(18);
+  const [scale, setScale] = useState(112);
+  const [activeCaption, setActiveCaption] = useState(1);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
-  useEffect(() => { const saved = window.localStorage.getItem("clipwire-workspace"); if (!saved) return; try { const next = JSON.parse(saved); if (next.campaignUrl) setCampaignUrl(next.campaignUrl); if (next.selectedId) setSelectedId(next.selectedId); } catch {} }, []);
-  useEffect(() => { window.localStorage.setItem("clipwire-workspace", JSON.stringify({ campaignUrl, selectedId })); }, [campaignUrl, selectedId]);
-  const selected = useMemo(() => candidates.find((item) => item.id === selectedId) ?? candidates[0], [selectedId]);
-  function flash(message: string) { setToast(message); window.setTimeout(() => setToast(""), 2600); }
-  function compileBrief() { setCompiled(false); window.setTimeout(() => { setCompiled(true); setView("brief"); flash("Campaign rules compiled into a clip brief"); }, 650); }
-  function loadSource(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (file) { setSourceName(file.name); flash("Source added — ready for transcript analysis"); } }
+  useEffect(() => {
+    const saved = window.localStorage.getItem("clipwire-editor");
+    if (!saved) return;
+    try {
+      const next = JSON.parse(saved);
+      if (next.layout) setLayout(next.layout);
+      if (next.captionStyle) setCaptionStyle(next.captionStyle);
+    } catch {}
+  }, []);
 
-  return <main className="app-shell">
-    <aside className="sidebar">
-      <div className="brand-row"><div className="brand-mark">CW</div><div><strong>CLIPWIRE</strong><span>Campaign intelligence</span></div></div>
-      <nav className="main-nav" aria-label="Workspace navigation"><p className="eyebrow">Workspace</p>{navItems.map((item) => <button key={item.id} className={view === item.id ? "nav-button active" : "nav-button"} onClick={() => setView(item.id)}><span>{item.glyph}</span>{item.label}</button>)}</nav>
-      <div className="campaign-list"><div className="list-head"><p className="eyebrow">Campaigns</p><button aria-label="Add campaign" onClick={() => setView("campaign")}>+</button></div>
-        <button className="campaign-row selected" onClick={() => setView("campaign")}><span className="mini-logo coral">A</span><span><strong>Ambro Founder Clips</strong><small>$3.00 / 1K views</small></span></button>
-        <button className="campaign-row" onClick={() => flash("Demo campaign selected")}><span className="mini-logo blue">S</span><span><strong>SaaS Growth Cuts</strong><small>$1.50 / 1K views</small></span></button>
-        <button className="campaign-row" onClick={() => flash("Demo campaign selected")}><span className="mini-logo gold">V</span><span><strong>Viral Founder</strong><small>$5.00 / 1K views</small></span></button>
-      </div>
-      <div className="goal-card"><div className="goal-ring"><span>$1.8K</span><small>this month</small></div><div><p>Path to $10K</p><strong>18% funded</strong><button onClick={() => setView("revenue")}>Open revenue plan →</button></div></div>
-    </aside>
-    <section className="workspace">
-      <header className="topbar"><div className="crumbs"><span>Campaigns</span><b>/</b><strong>Ambro Founder Clips</strong></div><div className="top-actions"><span className="live-pill"><i /> Campaign active</span><button className="icon-button" aria-label="Notifications" onClick={() => flash("No new campaign alerts")}>◌</button><button className="avatar" aria-label="Account menu" onClick={() => flash("Workspace owner")}>SS</button></div></header>
-      <div className="content">
-        {view === "campaign" && <CampaignDesk campaignUrl={campaignUrl} setCampaignUrl={setCampaignUrl} compileBrief={compileBrief} compiled={compiled} setView={setView} sourceName={sourceName} loadSource={loadSource} flash={flash} />}
-        {view === "brief" && <BriefCompiler setView={setView} flash={flash} />}
-        {view === "clips" && <ClipLab selected={selected} setSelectedId={setSelectedId} playing={playing} setPlaying={setPlaying} captionStyle={captionStyle} setCaptionStyle={setCaptionStyle} flash={flash} />}
-        {view === "revenue" && <RevenuePlan setView={setView} />}
-      </div>
-    </section>
-    {toast && <div className="toast" role="status">✓ {toast}</div>}
-  </main>;
+  useEffect(() => {
+    window.localStorage.setItem("clipwire-editor", JSON.stringify({ layout, captionStyle }));
+  }, [layout, captionStyle]);
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+      if (event.code === "Space") { event.preventDefault(); togglePlayback(); }
+      if (event.key.toLowerCase() === "s") splitClip();
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") { event.preventDefault(); flash("Undid last change"); }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  });
+
+  useEffect(() => {
+    if (sourceUrl && videoRef.current) {
+      videoRef.current.muted = muted;
+      if (playing) videoRef.current.play().catch(() => setPlaying(false));
+      else videoRef.current.pause();
+    }
+  }, [playing, muted, sourceUrl]);
+
+  useEffect(() => {
+    if (!playing || sourceUrl) return;
+    const timer = window.setInterval(() => setCurrentTime((value) => value >= 34 ? 0 : value + .04), 40);
+    return () => window.clearInterval(timer);
+  }, [playing, sourceUrl]);
+
+  function flash(message: string) {
+    setToast(message);
+    window.setTimeout(() => setToast(""), 2300);
+  }
+
+  function togglePlayback() {
+    setPlaying((value) => !value);
+  }
+
+  function loadSource(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+    setSourceUrl(URL.createObjectURL(file));
+    setSourceName(file.name);
+    setTool("captions");
+    flash("Video loaded locally · transcript ready to generate");
+  }
+
+  function splitClip() {
+    setSelectedLayer("video");
+    flash(`Split added at ${formatTime(currentTime)}`);
+  }
+
+  function startRender() {
+    setRenderProgress(4);
+    const timer = window.setInterval(() => {
+      setRenderProgress((value) => {
+        const next = Math.min(value + 12, 100);
+        if (next === 100) {
+          window.clearInterval(timer);
+          window.setTimeout(() => { setShowExport(false); setRenderProgress(0); flash("Render complete · 1080 × 1920 MP4"); }, 650);
+        }
+        return next;
+      });
+    }, 180);
+  }
+
+  function syncVideoTime(value: number) {
+    setCurrentTime(value);
+    if (videoRef.current) videoRef.current.currentTime = value;
+  }
+
+  return (
+    <main className="editor-shell" onKeyDown={(event: ReactKeyboardEvent) => event.stopPropagation()}>
+      <header className="editor-topbar">
+        <div className="brand"><span className="brand-glyph">C</span><strong>clipwire</strong><i>studio</i></div>
+        <div className="project-title"><button onClick={() => flash("Back to projects")}>‹</button><span><strong>Founder distribution cut</strong><small>Draft · saved just now</small></span></div>
+        <div className="history"><button aria-label="Undo" onClick={() => flash("Undid last change")}>↶</button><button aria-label="Redo" onClick={() => flash("Redid last change")}>↷</button><span>00:34.0</span></div>
+        <div className="top-actions"><button className="format-pill" onClick={() => flash("Format is optimized for Shorts, Reels, and TikTok")}><span>▯</span> 9:16 <b>⌄</b></button><button className="share-button" onClick={() => flash("Review link copied")}>Share</button><button className="export-main" onClick={() => setShowExport(true)}>Export <span>↗</span></button></div>
+      </header>
+
+      <section className="editing-grid">
+        <nav className="tool-rail" aria-label="Editor tools">
+          {tools.map((item) => <button className={tool === item.id ? "tool active" : "tool"} onClick={() => setTool(item.id)} key={item.id}><span>{item.icon}</span><small>{item.label}</small></button>)}
+          <div className="rail-spacer" /><button className="tool"><span>?</span><small>Help</small></button>
+        </nav>
+
+        <aside className="asset-panel">
+          <PanelContent tool={tool} sourceName={sourceName} loadSource={loadSource} captionStyle={captionStyle} setCaptionStyle={setCaptionStyle} activeCaption={activeCaption} setActiveCaption={setActiveCaption} layout={layout} setLayout={setLayout} flash={flash} />
+        </aside>
+
+        <section className="stage-zone">
+          <div className="stage-toolbar"><div><button onClick={() => setZoom(Math.max(40, zoom - 8))}>−</button><span>{zoom}%</span><button onClick={() => setZoom(Math.min(120, zoom + 8))}>＋</button><button onClick={() => setZoom(72)}>Fit</button></div><div><button onClick={() => flash("Safe zones enabled")}>⌗ Safe zones</button><button onClick={() => flash("Guides enabled")}>⌁ Guides</button></div></div>
+          <div className="canvas-space">
+            <div className={`video-canvas layout-${layout}`} style={{ transform: `scale(${zoom / 100})` }}>
+              {sourceUrl ? <video ref={videoRef} src={sourceUrl} className="local-video" onTimeUpdate={(event) => setCurrentTime((event.target as HTMLVideoElement).currentTime)} onEnded={() => setPlaying(false)} /> : <DemoVideo layout={layout} />}
+              {captionsOn && <div className={`canvas-caption caption-${captionStyle}`}><span>BUILD THE</span> <em>‏AUDIENCE</em><br /><span>BEFORE THE PRODUCT</span></div>}
+              <div className="selection-box"><i className="handle tl" /><i className="handle tr" /><i className="handle bl" /><i className="handle br" /></div>
+              <div className="canvas-badge">@founderfiles</div>
+              <div className="platform-ui"><span>♡</span><span>◯</span><span>↗</span></div>
+            </div>
+          </div>
+          <div className="transport"><div className="transport-left"><button onClick={() => syncVideoTime(0)}>│‹</button><button onClick={() => syncVideoTime(Math.max(0, currentTime - 5))}>−5</button><button className="transport-play" onClick={togglePlayback}>{playing ? "Ⅱ" : "▶"}</button><button onClick={() => syncVideoTime(Math.min(34, currentTime + 5))}>+5</button><button onClick={() => syncVideoTime(34)}>›│</button></div><div className="timecode"><b>{formatTime(currentTime)}</b><span>/ 00:34.00</span></div><div className="transport-right"><button onClick={() => setMuted(!muted)}>{muted ? "🔇" : "◖))"}</button><button onClick={() => flash("Playback quality: Full")}>Full⌄</button></div></div>
+        </section>
+
+        <aside className="inspector-panel">
+          <div className="inspector-tabs">{(["clip", "style", "adjust"] as Inspector[]).map((item) => <button className={inspector === item ? "active" : ""} onClick={() => setInspector(item)} key={item}>{item}</button>)}</div>
+          {inspector === "clip" && <ClipInspector layout={layout} setLayout={setLayout} scale={scale} setScale={setScale} blur={blur} setBlur={setBlur} flash={flash} />}
+          {inspector === "style" && <StyleInspector captionStyle={captionStyle} setCaptionStyle={setCaptionStyle} captionsOn={captionsOn} setCaptionsOn={setCaptionsOn} />}
+          {inspector === "adjust" && <AdjustInspector flash={flash} />}
+        </aside>
+
+        <Timeline currentTime={currentTime} setCurrentTime={syncVideoTime} playing={playing} selectedLayer={selectedLayer} setSelectedLayer={setSelectedLayer} splitClip={splitClip} />
+      </section>
+
+      {showExport && <ExportModal progress={renderProgress} close={() => { if (!renderProgress) setShowExport(false); }} startRender={startRender} />}
+      {toast && <div className="editor-toast" role="status"><span>✓</span>{toast}</div>}
+    </main>
+  );
 }
 
-function CampaignDesk({ campaignUrl, setCampaignUrl, compileBrief, compiled, setView, sourceName, loadSource, flash }: { campaignUrl: string; setCampaignUrl: (value: string) => void; compileBrief: () => void; compiled: boolean; setView: (view: View) => void; sourceName: string; loadSource: (event: ChangeEvent<HTMLInputElement>) => void; flash: (message: string) => void }) {
-  return <>
-    <section className="hero-grid"><div className="hero-copy"><span className="section-kicker">Campaign command center</span><h1>Turn a campaign brief into clips built to <em>win.</em></h1><p>Clipwire converts payout rules, creative preferences, and source footage into ranked, compliant edits—before you spend time exporting.</p></div>
-      <div className="economics-card"><span>Campaign economics</span><strong>$3.00 <small>/ 1K views</small></strong><div className="budget-line"><span><b>$2,180</b> remaining</span><span>73%</span></div><div className="progress"><i /></div><small>Cap: $3,000 · Ends in 18 days</small></div></section>
-    <section className="stepper" aria-label="Campaign workflow">{[["1","Import","Campaign rules"],["2","Compile","Structured brief"],["3","Analyze","Source footage"],["4","Review","Ranked clips"]].map((step,index) => <div className={index < 2 ? "step done" : index === 2 ? "step current" : "step"} key={step[0]}><span>{index < 2 ? "✓" : step[0]}</span><p><strong>{step[1]}</strong><small>{step[2]}</small></p></div>)}</section>
-    <div className="desk-grid">
-      <section className="panel import-panel"><div className="panel-head"><div><span className="section-kicker">01 · Import</span><h2>Campaign source</h2></div><span className="whop-badge">W Whop</span></div><label htmlFor="campaign-url">Campaign link or requirements</label><div className="input-action"><input id="campaign-url" value={campaignUrl} onChange={(event) => setCampaignUrl(event.target.value)} /><button className="primary-button" onClick={compileBrief}>{compiled ? "Recompile brief" : "Reading campaign…"}</button></div><p className="helper">Paste a public campaign link, or replace it with the campaign rules. Clipwire separates must-follow rules from creative guidance.</p><div className="import-result"><div className="mini-logo coral">A</div><div><strong>Ambro Founder Clips</strong><span>Imported from Whop · refreshed just now</span></div><span className="match-pill">12 rules found</span></div></section>
-      <section className="panel source-panel"><div className="panel-head"><div><span className="section-kicker">02 · Source</span><h2>Footage library</h2></div><span className="small-status">1 source</span></div><div className="source-file"><div className="source-thumb"><span>▶</span><small>38:14</small></div><div><strong>{sourceName}</strong><span>Transcript ready · 14 high-signal moments</span><div className="signal-line"><i /><i /><i /><i /><i /></div></div><label className="replace-button">Replace<input type="file" accept="video/*,audio/*" onChange={loadSource} /></label></div><button className="ghost-button full" onClick={() => flash("Add another source using the Replace control in this prototype")}>＋ Add YouTube link or source file</button></section>
-    </div>
-    <section className="panel brief-preview"><div className="panel-head"><div><span className="section-kicker">Compiled campaign brief</span><h2>The rules your clip must satisfy</h2></div><button className="text-button" onClick={() => setView("brief")}>Edit structured brief →</button></div><div className="rules-grid">{hardRules.map(([label,value],index) => <div className="rule" key={label}><span className={index === 3 ? "rule-icon danger" : "rule-icon"}>{index === 3 ? "!" : "✓"}</span><div><small>{label}</small><strong>{value}</strong></div></div>)}</div><div className="creative-row"><span>Creative target</span><strong>Fast founder insight</strong><i /><strong>Pattern interrupt in 1.5s</strong><i /><strong>High-contrast captions</strong><i /><strong>Clear standalone takeaway</strong></div><button className="launch-button" onClick={() => setView("clips")}><span>✦</span><div><strong>Generate ranked clip concepts</strong><small>Find the best moments for this exact campaign</small></div><b>→</b></button></section>
-  </>;
+function PanelContent({ tool, sourceName, loadSource, captionStyle, setCaptionStyle, activeCaption, setActiveCaption, layout, setLayout, flash }: {
+  tool: Tool; sourceName: string; loadSource: (event: ChangeEvent<HTMLInputElement>) => void; captionStyle: CaptionStyle; setCaptionStyle: (style: CaptionStyle) => void; activeCaption: number; setActiveCaption: (index: number) => void; layout: Layout; setLayout: (layout: Layout) => void; flash: (message: string) => void;
+}) {
+  if (tool === "media") return <><PanelHead title="Media" action="＋" /><label className="upload-drop"><span>＋</span><strong>Upload media</strong><small>Video, audio, or image · stays on this device</small><input type="file" accept="video/*,audio/*,image/*" onChange={loadSource} /></label><div className="panel-section-title"><span>Project media</span><button>▦</button></div><div className="media-grid"><button className="media-card selected"><div className="media-thumb host"><i>▶</i><small>38:14</small></div><strong>{sourceName}</strong><span>1920 × 1080</span></button><button className="media-card"><div className="media-thumb gameplay"><small>00:34</small></div><strong>Subway_Run_04.mp4</strong><span>1080 × 1920</span></button><button className="media-card"><div className="media-thumb desk"><small>00:08</small></div><strong>Keyboard_Broll.mp4</strong><span>4K stock</span></button></div></>;
+  if (tool === "captions") return <><PanelHead title="Captions" action="•••" /><button className="magic-action" onClick={() => flash("Captions generated and filler words removed")}><span>✦</span><div><strong>Auto captions</strong><small>English · remove filler words</small></div><b>↗</b></button><div className="panel-section-title"><span>Style</span><button onClick={() => flash("Caption preset saved")}>Save preset</button></div><div className="caption-presets">{captionStyles.map((style) => <button className={`${style.id} ${captionStyle === style.id ? "selected" : ""}`} onClick={() => setCaptionStyle(style.id)} key={style.id}><span>{style.sample}</span><small>{style.label}</small></button>)}</div><div className="panel-section-title"><span>Transcript</span><button>⌕</button></div><div className="transcript-list">{transcript.map(([time, line], index) => <button className={activeCaption === index ? "active" : ""} onClick={() => setActiveCaption(index)} key={time}><span>{time}</span><p contentEditable suppressContentEditableWarning>{line}</p></button>)}</div></>;
+  if (tool === "broll") return <><PanelHead title="B-roll" action="⌕" /><button className="magic-action" onClick={() => flash("AI placed 4 B-roll suggestions on the timeline")}><span>✦</span><div><strong>Auto B-roll</strong><small>Match visuals to transcript</small></div><b>＋</b></button><label className="search-field">⌕<input placeholder="Search stock video" /></label><div className="chip-row"><button>Business</button><button>Technology</button><button>Money</button></div><div className="stock-grid">{["city","laptop","charts","phone","team","code"].map((item,index) => <button className={`stock ${item}`} onClick={() => flash(`${item} B-roll added above the main clip`)} key={item}><span>＋</span><small>00:0{index+4}</small></button>)}</div></>;
+  if (tool === "audio") return <><PanelHead title="Audio" action="⌕" /><button className="magic-action" onClick={() => flash("Voice enhanced and background noise reduced")}><span>✦</span><div><strong>Enhance speech</strong><small>Clean noise · level voice</small></div><b>↗</b></button><label className="search-field">⌕<input placeholder="Search music & sound effects" /></label><div className="audio-tabs"><button className="active">Music</button><button>Sound effects</button></div>{[["Momentum","Sane Beats","2:18"],["Soft Focus","Helio","1:54"],["Dream Sequence","Nara","2:41"]].map(([name,artist,time],index) => <button className="audio-row" onClick={() => flash(`${name} added to the audio track`)} key={name}><span>{index === 1 ? "▶" : "♫"}</span><p><strong>{name}</strong><small>{artist}</small></p><time>{time}</time><b>＋</b></button>)}</>;
+  if (tool === "elements") return <><PanelHead title="Elements" action="⌕" /><div className="element-block"><span>Text</span><button className="add-heading" onClick={() => flash("Heading added to canvas")}>Add a heading</button><div><button>Add body text</button><button>Add small text</button></div></div><div className="panel-section-title"><span>Shapes & stickers</span><button>See all</button></div><div className="element-grid"><button>→</button><button>○</button><button>★</button><button>!</button><button>⌁</button><button>#</button></div><div className="panel-section-title"><span>Brand</span><button>Manage</button></div><div className="brand-kit"><span>FF</span><div><strong>Founder Files</strong><small>2 fonts · 4 colors</small></div></div></>;
+  return <><PanelHead title="AI edit" action="✦" /><div className="ai-intro"><span>✦</span><strong>What should we change?</strong><p>Describe the edit. Clipwire will suggest timeline changes you can accept or refine.</p></div><textarea className="ai-prompt" defaultValue="Tighten the hook, remove pauses, add relevant business B-roll, and use energetic captions." /><button className="run-ai" onClick={() => flash("AI edit plan created · 7 changes ready to review")}>Generate edit plan <span>↗</span></button><div className="panel-section-title"><span>Quick actions</span></div>{["Find the strongest 30 seconds","Remove silences and filler words","Turn this into a split-screen clip","Add zooms on key phrases"].map((item) => <button className="suggestion" onClick={() => flash(`${item} applied as a draft`)} key={item}>{item}<span>＋</span></button>)}<div className="campaign-assist"><span>Optional assist</span><strong>Campaign brief</strong><p>25–45s · @AmbroHQ · #buildinpublic</p><button onClick={() => flash("Campaign requirements checked against this edit")}>Check this edit</button></div></>;
 }
 
-function BriefCompiler({ setView, flash }: { setView: (view: View) => void; flash: (message: string) => void }) {
-  const [weights, setWeights] = useState({ compliance: 50, retention: 30, payout: 20 });
-  return <><PageTitle kicker="Brief compiler" title="Make the campaign machine-readable." copy="Review what the campaign requires, what it prefers, and how Clipwire should rank opportunities." /><div className="brief-layout"><section className="panel rule-editor"><div className="panel-head"><div><span className="section-kicker">Hard constraints</span><h2>Submission gate</h2></div><span className="match-pill">4 groups · required</span></div>{hardRules.map(([label,value],index) => <label className="editor-row" key={label}><span>{index+1}</span><div><small>{label}</small><input defaultValue={value} /></div><button onClick={() => flash(`${label} rule kept`)}>Keep</button></label>)}</section><aside className="side-stack"><section className="panel"><span className="section-kicker">Ranking weights</span><h2>What should win?</h2>{(Object.keys(weights) as (keyof typeof weights)[]).map((key) => <label className="range-row" key={key}><span><b>{key}</b><strong>{weights[key]}%</strong></span><input type="range" min="0" max="100" value={weights[key]} onChange={(event) => setWeights({...weights,[key]:Number(event.target.value)})} /></label>)}</section><section className="panel guardrail-card"><span className="section-kicker">Safety rail</span><h2>Never auto-submit</h2><p>Final source-rights confirmation and account posting remain human decisions.</p><span className="safe-pill">Human approval required</span></section><button className="launch-button compact" onClick={() => setView("clips")}><span>✦</span><div><strong>Apply brief and rank clips</strong><small>Use the current scoring mix</small></div><b>→</b></button></aside></div></>;
+function PanelHead({ title, action }: { title: string; action: string }) { return <div className="panel-head"><h2>{title}</h2><button>{action}</button></div>; }
+
+function DemoVideo({ layout }: { layout: Layout }) {
+  return <div className="demo-video"><div className="host-shot"><div className="studio-light one" /><div className="studio-light two" /><div className="host-person"><span /><i /></div><div className="mic" /></div>{layout !== "focus" && <div className="gameplay-shot"><div className="game-road"><i /><i /><i /></div><span className="score">012940</span><span className="coin">● 24</span></div>}<div className="grain" /></div>;
 }
 
-function ClipLab({ selected, setSelectedId, playing, setPlaying, captionStyle, setCaptionStyle, flash }: { selected: Candidate; setSelectedId: (id: number) => void; playing: boolean; setPlaying: (value: boolean) => void; captionStyle: "Punch" | "Clean" | "Karaoke"; setCaptionStyle: (value: "Punch" | "Clean" | "Karaoke") => void; flash: (message: string) => void }) {
-  return <><PageTitle kicker="Clip lab" title="Three moments worth editing." copy="Candidates are ranked against Ambro's rules—not generic virality advice." action={<button className="primary-button" onClick={() => flash("Source scan refreshed · rankings unchanged")}>↻ Re-analyze source</button>} /><div className="lab-layout">
-    <section className="candidate-column"><div className="candidate-head"><span>Ranked candidates</span><small>Fit score combines compliance + retention + payout</small></div>{candidates.map((candidate,index) => <button className={selected.id === candidate.id ? "candidate-card selected" : "candidate-card"} key={candidate.id} onClick={() => { setSelectedId(candidate.id); setPlaying(false); }}><span className="rank">0{index+1}</span><div className={`candidate-visual ${candidate.accent}`}><span>{candidate.duration}</span><i>{candidate.retention}% retention</i></div><div className="candidate-copy"><div><span className={candidate.risk === "Ready" ? "ready-tag" : "review-tag"}>{candidate.risk}</span><strong>{candidate.title}</strong></div><p>“{candidate.hook}”</p><small>{candidate.transcript}</small><div className="metric-row"><span>Views <b>{candidate.predicted}</b></span><span>Est. payout <b>{candidate.payout}</b></span></div></div><div className="fit-score"><strong>{candidate.score}</strong><small>fit</small></div></button>)}</section>
-    <section className="preview-column"><div className="phone-wrap"><div className={`phone-screen ${selected.accent}`}><div className="phone-top"><span>AMBRO</span><b>● ● ●</b></div><div className="portrait-shape"><i /><span /></div><div className={`caption caption-${captionStyle.toLowerCase()}`}>I WASTED <em>2 YEARS</em><br />BUILDING THE WRONG WAY.</div><button className="play-button" aria-label={playing ? "Pause preview" : "Play preview"} onClick={() => setPlaying(!playing)}>{playing ? "Ⅱ" : "▶"}</button><div className="phone-lower"><span>@AmbroHQ</span><p>The distribution lesson every founder learns too late.</p><b>#buildinpublic</b></div><div className="phone-progress"><i className={playing ? "playing" : ""} /></div></div></div><div className="style-tabs" aria-label="Caption style">{(["Punch","Clean","Karaoke"] as const).map((style) => <button className={captionStyle === style ? "active" : ""} onClick={() => setCaptionStyle(style)} key={style}>{style}</button>)}</div><div className="timeline"><div className="timeline-time"><span>00:00</span><span>{selected.duration}</span></div><div className="audio-wave">{Array.from({length:34}).map((_,index) => <i key={index} style={{height:`${8+((index*13)%26)}px`}} />)}</div></div></section>
-    <aside className="compliance-column"><div className="compliance-score"><div className="score-orbit"><strong>{selected.score}</strong><small>/100</small></div><div><span>Campaign fit</span><strong>{selected.risk === "Ready" ? "Ready to review" : "1 item to review"}</strong></div></div><section className="panel compliance-panel"><div className="panel-head"><div><span className="section-kicker">Submission gate</span><h2>Compliance check</h2></div></div>{checks.map(([label,status]) => <div className="check-row" key={label}><span className={status === "pass" ? "check pass" : "check warn"}>{status === "pass" ? "✓" : "!"}</span><p>{label}</p></div>)}</section><section className="payout-box"><span>Expected campaign payout</span><strong>{selected.payout}</strong><small>Based on predicted qualified views at $3 RPM</small></section><button className="export-button" onClick={() => flash("Clip package marked ready for human export review")}>Mark ready for export <span>↗</span></button><p className="fine-print">Prototype mode: creates an export plan. Rendering and direct posting come in the next build.</p></aside>
-  </div></>;
+function ClipInspector({ layout, setLayout, scale, setScale, blur, setBlur, flash }: { layout: Layout; setLayout: (layout: Layout) => void; scale: number; setScale: (value: number) => void; blur: number; setBlur: (value: number) => void; flash: (message: string) => void }) {
+  return <div className="inspector-content"><div className="inspector-section"><div className="section-row"><strong>Layout</strong><button onClick={() => flash("Layout reset")}>Reset</button></div><div className="layout-options"><button className={layout === "focus" ? "active" : ""} onClick={() => setLayout("focus")}><span className="layout-mini focus" /><small>Focus</small></button><button className={layout === "split" ? "active" : ""} onClick={() => setLayout("split")}><span className="layout-mini split" /><small>Split</small></button><button className={layout === "gameplay" ? "active" : ""} onClick={() => setLayout("gameplay")}><span className="layout-mini game" /><small>Gameplay</small></button></div></div><div className="inspector-section"><div className="section-row"><strong>Transform</strong><button onClick={() => { setScale(100); flash("Transform reset"); }}>↺</button></div><RangeControl label="Scale" value={scale} min={75} max={160} suffix="%" setValue={setScale} /><div className="two-inputs"><label><span>X</span><input defaultValue="0" /></label><label><span>Y</span><input defaultValue="-14" /></label></div><div className="transform-buttons"><button onClick={() => flash("Video fitted to canvas")}>Fit</button><button className="active" onClick={() => flash("Video filled to canvas")}>Fill</button><button onClick={() => flash("Auto reframe follows the speaker")}>✦ Auto reframe</button></div></div><div className="inspector-section"><div className="section-row"><strong>Background</strong><button>＋</button></div><div className="background-row"><button className="blur-swatch active" /><button className="color-swatch black" /><button className="color-swatch violet" /><button className="color-swatch cream" /><button className="color-swatch image">▧</button></div><RangeControl label="Blur" value={blur} min={0} max={40} setValue={setBlur} /></div><div className="inspector-section"><button className="danger-button" onClick={() => flash("Selected layer removed from draft")}>⌫ Delete selected layer</button></div></div>;
 }
 
-function RevenuePlan({ setView }: { setView: (view: View) => void }) {
-  return <><PageTitle kicker="Revenue plan" title="Make $10K a portfolio problem." copy="Track the number of qualified views, clips, and campaigns needed—then work the highest-return queue first." action={<button className="primary-button" onClick={() => setView("clips")}>Open next clip →</button>} /><div className="revenue-stats">{[["Monthly target","$10,000","Goal"],["Projected","$7,420","+18% vs last month"],["Qualified views needed","2.86M","blended $3.50 RPM"],["Clips to publish","96","24 per week"]].map(([label,value,note]) => <div className="stat-card" key={label}><span>{label}</span><strong>{value}</strong><small>{note}</small></div>)}</div><div className="revenue-layout"><section className="panel projection-panel"><div className="panel-head"><div><span className="section-kicker">Monthly projection</span><h2>Revenue by campaign</h2></div><span className="match-pill">74% of target</span></div><div className="bar-chart">{[["Ambro",74,"$3,420"],["SaaS Growth",48,"$2,180"],["Viral Founder",31,"$1,420"],["Affiliate funnel",14,"$400"]].map(([name,size,value]) => <div className="bar-row" key={name}><span>{name}</span><div><i style={{width:`${size}%`}} /></div><strong>{value}</strong></div>)}</div></section><section className="panel sprint-panel"><span className="section-kicker">This week's sprint</span><h2>Highest-leverage queue</h2>{[["Publish Ambro candidate #1","$144–$276"],["Create 3 hook variants","+22% upside"],["Import one $5+ RPM campaign","Portfolio gap"],["Review 7-day retention","Friday"]].map(([task,value],index) => <div className="sprint-row" key={task}><span>{index+1}</span><p><strong>{task}</strong><small>{value}</small></p><i>{index === 0 ? "Now" : ""}</i></div>)}</section></div><section className="panel model-note"><div><span className="section-kicker">Operating thesis</span><h2>Don't chase views. Chase qualified value per edit hour.</h2></div><p>Clipwire prioritizes campaigns with healthy remaining budgets, achievable creative fit, clear rights, and payout upside. Native platform revenue is treated as a bonus—not the business model.</p></section></>;
+function StyleInspector({ captionStyle, setCaptionStyle, captionsOn, setCaptionsOn }: { captionStyle: CaptionStyle; setCaptionStyle: (value: CaptionStyle) => void; captionsOn: boolean; setCaptionsOn: (value: boolean) => void }) {
+  return <div className="inspector-content"><div className="inspector-section"><div className="section-row"><strong>Captions</strong><button className={captionsOn ? "toggle on" : "toggle"} onClick={() => setCaptionsOn(!captionsOn)}><i /></button></div><div className="caption-select">{captionStyles.map((style) => <button className={captionStyle === style.id ? "active" : ""} onClick={() => setCaptionStyle(style.id)} key={style.id}>{style.label}</button>)}</div></div><div className="inspector-section"><div className="section-row"><strong>Typography</strong><button>↺</button></div><label className="select-field"><span>Font</span><select defaultValue="Anton"><option>Anton</option><option>Inter Black</option><option>Montserrat</option></select></label><RangeControl label="Size" value={54} min={24} max={80} setValue={() => {}} /><div className="format-grid"><button className="active">B</button><button><i>I</i></button><button>≡</button><button>☰</button></div></div><div className="inspector-section"><strong className="section-title">Colors</strong><div className="color-pickers"><label><i className="text-color" /><span>Text</span></label><label><i className="highlight-color" /><span>Highlight</span></label><label><i className="stroke-color" /><span>Stroke</span></label></div></div><div className="inspector-section"><strong className="section-title">Animation</strong><div className="animation-row"><button className="active">Pop</button><button>Rise</button><button>Bounce</button></div></div></div>;
 }
 
-function PageTitle({ kicker, title, copy, action }: { kicker: string; title: string; copy: string; action?: React.ReactNode }) { return <header className="page-title"><div><span className="section-kicker">{kicker}</span><h1>{title}</h1><p>{copy}</p></div>{action}</header>; }
+function AdjustInspector({ flash }: { flash: (message: string) => void }) {
+  return <div className="inspector-content"><div className="inspector-section"><div className="section-row"><strong>Smart enhance</strong><button className="magic-small" onClick={() => flash("Smart enhancement applied")}>✦ Apply</button></div><p className="inspector-copy">Balance exposure, clarity, and skin tones for short-form feeds.</p></div><div className="inspector-section">{[["Exposure",4], ["Contrast",12], ["Saturation",8], ["Temperature",-2], ["Sharpness",18]].map(([label,value]) => <RangeControl key={label} label={String(label)} value={Number(value)} min={-40} max={40} setValue={() => {}} />)}</div><div className="inspector-section"><div className="section-row"><strong>Effects</strong><button>＋</button></div><button className="effect-card"><span>✦</span><div><strong>Face sharpen</strong><small>Strength 24</small></div></button><button className="effect-card"><span>↗</span><div><strong>Motion zooms</strong><small>4 moments</small></div></button></div></div>;
+}
+
+function RangeControl({ label, value, min, max, suffix = "", setValue }: { label: string; value: number; min: number; max: number; suffix?: string; setValue: (value: number) => void }) { return <label className="range-control"><span>{label}</span><input type="range" min={min} max={max} value={value} onChange={(event) => setValue(Number(event.target.value))} /><output>{value}{suffix}</output></label>; }
+
+function Timeline({ currentTime, setCurrentTime, playing, selectedLayer, setSelectedLayer, splitClip }: { currentTime: number; setCurrentTime: (time: number) => void; playing: boolean; selectedLayer: string; setSelectedLayer: (layer: string) => void; splitClip: () => void }) {
+  const playhead = `${(currentTime / 34) * 100}%`;
+  return <section className="timeline-area"><div className="timeline-tools"><div><button onClick={splitClip}>✂ <span>Split</span></button><button>⌫</button><button>⧉</button><button>↔</button></div><div><button>−</button><input type="range" min="40" max="130" defaultValue="86" /><button>＋</button><button>⌘</button></div></div><div className="timeline-ruler"><span className="track-label">Tracks</span><div>{[0,5,10,15,20,25,30,34].map((time) => <button key={time} onClick={() => setCurrentTime(time)} style={{left:`${(time/34)*100}%`}}><i />{time === 0 ? "00:00" : `00:${String(time).padStart(2,"0")}`}</button>)}</div></div><div className="timeline-body"><div className="track-names"><button className={selectedLayer === "video" ? "active" : ""} onClick={() => setSelectedLayer("video")}><span>▣</span><p><strong>Video</strong><small>2 layers</small></p><i>◉</i></button><button className={selectedLayer === "captions" ? "active" : ""} onClick={() => setSelectedLayer("captions")}><span>CC</span><p><strong>Captions</strong><small>English</small></p><i>◉</i></button><button className={selectedLayer === "broll" ? "active" : ""} onClick={() => setSelectedLayer("broll")}><span>◫</span><p><strong>B-roll</strong><small>3 clips</small></p><i>◉</i></button><button className={selectedLayer === "audio" ? "active" : ""} onClick={() => setSelectedLayer("audio")}><span>♫</span><p><strong>Audio</strong><small>2 tracks</small></p><i>◉</i></button></div><div className="tracks"><div className="playhead" style={{left:playhead}}><span>{formatTime(currentTime)}</span><i /></div><div className="track video-track"><button className="clip main selected"><span className="filmstrip">{Array.from({length:12}).map((_,i) => <i key={i} />)}</span><strong>{"Founder_Podcast_Ep12.mp4"}</strong><small>00:00–00:34</small></button></div><div className="track caption-track">{[0,24,49,72].map((left,index) => <button style={{left:`${left}%`,width:index === 3 ? "25%" : "23%"}} key={left}><span>{transcript[index][1].slice(0,30)}…</span></button>)}</div><div className="track broll-track"><button className="bclip one" style={{left:"18%",width:"17%"}}>Laptop close-up</button><button className="bclip two" style={{left:"47%",width:"13%"}}>Audience graph</button><button className="bclip three" style={{left:"72%",width:"20%"}}>Launch day</button></div><div className="track audio-track"><button className="voice-wave"><span>{Array.from({length:86}).map((_,i) => <i style={{height:`${5+(i*7)%17}px`}} key={i} />)}</span><strong>Enhanced voice</strong></button><button className="music-wave"><span>{Array.from({length:86}).map((_,i) => <i style={{height:`${4+(i*11)%12}px`}} key={i} />)}</span><strong>Momentum</strong></button></div></div></div><input aria-label="Timeline playhead" className="timeline-scrubber" type="range" min="0" max="34" step=".02" value={currentTime} onChange={(event) => setCurrentTime(Number(event.target.value))} /><span className={playing ? "playing-indicator on" : "playing-indicator"}>●</span></section>;
+}
+
+function ExportModal({ progress, close, startRender }: { progress: number; close: () => void; startRender: () => void }) {
+  return <div className="modal-backdrop" onMouseDown={close}><section className="export-modal" onMouseDown={(event) => event.stopPropagation()}><header><div><span>Export clip</span><h2>Founder distribution cut</h2></div><button onClick={close}>×</button></header><div className="export-preview"><div className="mini-export-video"><span>BUILD THE <em>AUDIENCE</em></span></div><div><strong>Ready to render</strong><small>All media is available · no missing fonts</small><p><i>✓</i> Captions inside safe zone</p><p><i>✓</i> Audio peaks below 0 dB</p></div></div><div className="export-settings"><label><span>Resolution</span><select><option>1080 × 1920 (Full HD)</option><option>2160 × 3840 (4K)</option></select></label><div><label><span>Frame rate</span><select><option>30 fps</option><option>60 fps</option></select></label><label><span>Format</span><select><option>MP4 · H.264</option><option>MOV</option></select></label></div><label className="switch-row"><span><strong>Burn in captions</strong><small>Include captions in the rendered video</small></span><button className="toggle on"><i /></button></label></div>{progress > 0 ? <div className="rendering"><span><strong>Rendering clip</strong><b>{progress}%</b></span><div><i style={{width:`${progress}%`}} /></div><small>You can keep editing after this prototype render finishes.</small></div> : <footer><button onClick={close}>Cancel</button><button className="export-confirm" onClick={startRender}>Export MP4 <span>↗</span></button></footer>}</section></div>;
+}
+
+function formatTime(seconds: number) { const whole = Math.floor(seconds); const hundredths = Math.floor((seconds - whole) * 100); return `00:${String(whole).padStart(2,"0")}.${String(hundredths).padStart(2,"0")}`; }
