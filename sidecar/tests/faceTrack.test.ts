@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -59,5 +61,30 @@ test("tracker output is validated and normalized: malformed points dropped, coor
   for (const point of points) {
     assert.ok(point.centerX >= 0 && point.centerX <= 1);
     assert.ok(point.centerY >= 0 && point.centerY <= 1);
+  }
+});
+
+test("speechIntervals are encoded onto the command line only when provided", async () => {
+  const { trackFaces } = await importFaceTrackWithFakePython("fake-echo-argv.sh");
+  const dir = mkdtempSync(path.join(tmpdir(), "facetrack-argv-"));
+  const outputPath = path.join(dir, "argv.json");
+  process.env.FAKE_ARGV_OUTPUT_PATH = outputPath;
+  try {
+    await trackFaces("/some/video.mp4", 0, 1);
+    const withoutIntervals = JSON.parse(readFileSync(outputPath, "utf8")) as string[];
+    assert.equal(withoutIntervals.length, 4); // video, start, end, sampleFps -- no 5th arg at all
+
+    await trackFaces("/some/video.mp4", 0, 1, {
+      speechIntervals: [
+        { start: 1, end: 2.5 },
+        { start: 4, end: 6.25 },
+      ],
+    });
+    const withIntervals = JSON.parse(readFileSync(outputPath, "utf8")) as string[];
+    assert.equal(withIntervals.length, 5);
+    assert.equal(withIntervals[4], "1.00-2.50,4.00-6.25");
+  } finally {
+    delete process.env.FAKE_ARGV_OUTPUT_PATH;
+    rmSync(dir, { recursive: true, force: true });
   }
 });

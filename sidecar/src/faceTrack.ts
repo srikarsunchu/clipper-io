@@ -64,8 +64,27 @@ function validateAndNormalizePoints(raw: unknown): FaceTrackPoint[] {
   return normalizeFaceTrackPoints(valid);
 }
 
+export interface SpeechInterval {
+  start: number;
+  end: number;
+}
+
 export interface TrackFacesOptions {
   timeoutMs?: number;
+  /** Coarse "someone is talking" windows (e.g. from Whisper word timestamps
+   * via shared/timeline-math.ts's `buildSpeechIntervals`), source-media-
+   * relative seconds. Purely additive -- omitting it preserves the tracker's
+   * pre-existing behavior exactly. */
+  speechIntervals?: SpeechInterval[];
+}
+
+function encodeSpeechIntervals(intervals: SpeechInterval[] | undefined): string | null {
+  if (!intervals || !intervals.length) return null;
+  const encoded = intervals
+    .filter((interval) => Number.isFinite(interval.start) && Number.isFinite(interval.end) && interval.end > interval.start)
+    .map((interval) => `${interval.start.toFixed(2)}-${interval.end.toFixed(2)}`)
+    .join(",");
+  return encoded || null;
 }
 
 export async function trackFaces(
@@ -78,9 +97,15 @@ export async function trackFaces(
   assertExecutableExists("the face-tracking script", SCRIPT_PATH);
 
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const args = [SCRIPT_PATH, filePath, String(startSec), String(endSec), SAMPLE_FPS];
+  const encodedSpeechIntervals = encodeSpeechIntervals(options.speechIntervals);
+  if (encodedSpeechIntervals) {
+    args.push(encodedSpeechIntervals);
+  }
+
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync(PYTHON_BIN, [SCRIPT_PATH, filePath, String(startSec), String(endSec), SAMPLE_FPS], {
+    ({ stdout } = await execFileAsync(PYTHON_BIN, args, {
       maxBuffer: MAX_BUFFER_BYTES,
       timeout: timeoutMs,
       killSignal: "SIGKILL",

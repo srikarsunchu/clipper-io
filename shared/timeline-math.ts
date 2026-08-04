@@ -27,6 +27,31 @@ export function findClipAtTime(clips: Clip[], time: number): Clip | null {
   return clips.find((clip) => time >= clip.startSec && time < clip.startSec + clipDuration(clip)) ?? null;
 }
 
+/** Merges transcript words into contiguous speech-active intervals -- gaps
+ * under `gapThresholdSec` don't split an interval. A coarse "is anyone
+ * talking right now" signal, not speaker-attributed; used to gate face
+ * tracking's speaker-switch heuristic so mouth-movement noise during a pause
+ * (a yawn, chewing, a silent reaction) isn't mistaken for a change in who's
+ * speaking. Deliberately not capped by word count/char length the way
+ * `buildCaptionCues` is -- those caps exist for on-screen caption legibility,
+ * which is irrelevant here and would only over-segment a real speech run. */
+export function buildSpeechIntervals(words: TranscriptWord[], gapThresholdSec = 0.6): { start: number; end: number }[] {
+  if (!words.length) return [];
+  const sorted = [...words].sort((a, b) => a.start - b.start);
+  const intervals: { start: number; end: number }[] = [];
+  let current = { start: sorted[0].start, end: sorted[0].end };
+  for (const word of sorted.slice(1)) {
+    if (word.start - current.end > gapThresholdSec) {
+      intervals.push(current);
+      current = { start: word.start, end: word.end };
+    } else {
+      current.end = Math.max(current.end, word.end);
+    }
+  }
+  intervals.push(current);
+  return intervals;
+}
+
 export function buildCaptionCues(words: TranscriptWord[]): CaptionCue[] {
   const cues: CaptionCue[] = [];
   let current: TranscriptWord[] = [];

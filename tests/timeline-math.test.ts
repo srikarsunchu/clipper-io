@@ -5,6 +5,7 @@ import type { RenderFacePoint, RenderFaceRange } from "../shared/render-contract
 import {
   buildCaptionCues,
   buildRenderCues,
+  buildSpeechIntervals,
   clampClipStart,
   findClipAtTime,
   getAdaptiveTickInterval,
@@ -241,4 +242,28 @@ test("interpolateFacePoint clamps output into [0,1] and is deterministic on dupl
   assert.ok(result);
   assert.equal(result!.centerX, 1);
   assert.equal(result!.centerY, 0);
+});
+
+test("buildSpeechIntervals merges words separated by short gaps, splits on long pauses", () => {
+  const intervals = buildSpeechIntervals([
+    { word: "hey", start: 0, end: 0.4 },
+    { word: "there", start: 0.5, end: 0.9 }, // 0.1s gap -- same interval
+    { word: "friend", start: 2.0, end: 2.5 }, // 1.1s gap -- new interval
+  ]);
+  assert.deepEqual(intervals, [
+    { start: 0, end: 0.9 },
+    { start: 2.0, end: 2.5 },
+  ]);
+});
+
+test("buildSpeechIntervals is not capped by word count/char length the way buildCaptionCues is", () => {
+  const words = Array.from({ length: 20 }, (_, i) => ({ word: "word", start: i * 0.3, end: i * 0.3 + 0.25 }));
+  const intervals = buildSpeechIntervals(words);
+  assert.equal(intervals.length, 1); // one continuous speech run, not split into caption-sized chunks
+  assert.equal(intervals[0].start, 0);
+  assert.equal(intervals[0].end, 19 * 0.3 + 0.25);
+});
+
+test("buildSpeechIntervals returns nothing for an empty transcript", () => {
+  assert.deepEqual(buildSpeechIntervals([]), []);
 });

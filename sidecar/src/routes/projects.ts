@@ -11,7 +11,7 @@ import {
   type FindMomentsRequest,
 } from "../../../shared/ai-edit.js";
 import type { FaceTrackPoint, FaceTrackRange, MediaFaceTrack, Project, Track, TrackKind } from "../../../shared/timeline.js";
-import { normalizeFaceTrackPoints, normalizeRanges, readMediaFaceTrack } from "../../../shared/timeline-math.js";
+import { buildSpeechIntervals, normalizeFaceTrackPoints, normalizeRanges, readMediaFaceTrack } from "../../../shared/timeline-math.js";
 
 const MAX_TRACK_SECONDS_PER_REQUEST = 20 * 60; // generous for a personal tool, still a real ceiling on a runaway request
 
@@ -265,10 +265,19 @@ projectsRouter.post("/:id/track-faces", async (req, res) => {
   }
 
   try {
+    // Word-level transcript timing doubles as a coarse "is anyone talking"
+    // signal for the tracker's speaker-switch heuristic -- only valid when
+    // the transcript was actually generated from this same media.
+    const speechIntervalsForMedia =
+      project.transcript && project.transcriptMediaId === mediaId ? buildSpeechIntervals(project.transcript) : [];
+
     const existing = readMediaFaceTrack(project, mediaId);
     const newPoints: FaceTrackPoint[] = [];
     for (const segment of mergedSegments) {
-      const points = await trackFaces(file.filePath, segment.startSec, segment.endSec);
+      const speechIntervals = speechIntervalsForMedia.filter(
+        (interval) => interval.end > segment.startSec && interval.start < segment.endSec
+      );
+      const points = await trackFaces(file.filePath, segment.startSec, segment.endSec, { speechIntervals });
       newPoints.push(...points);
     }
 

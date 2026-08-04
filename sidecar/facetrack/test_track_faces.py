@@ -10,9 +10,13 @@ import unittest
 from track_faces import (
     Track,
     age_out_tracks,
+    apply_dead_zone,
     assign_detections_to_tracks,
     body_anchor_point,
     choose_speaker,
+    is_speech_active,
+    parse_speech_intervals,
+    resolve_crop_point,
     resolve_fallback_point,
     should_reset_for_cut,
     smooth_points,
@@ -108,6 +112,19 @@ class ChooseSpeakerTest(unittest.TestCase):
         chosen = choose_speaker([current, strong_challenger], current_speaker_id=0, switch_margin=1.5)
         self.assertEqual(chosen.id, 1)
 
+    def test_speech_inactive_keeps_current_speaker_regardless_of_scores(self):
+        # A silent pause: even a huge jaw-open-variance "winner" shouldn't be
+        # trusted as a real speaker change when Whisper says no one is talking.
+        current = FakeTrack(0, size=0.1, score=0.05)
+        loud_but_silent = FakeTrack(1, size=0.1, score=0.90)
+        chosen = choose_speaker([current, loud_but_silent], current_speaker_id=0, speech_active=False)
+        self.assertEqual(chosen.id, 0)
+
+    def test_speech_inactive_falls_through_when_current_speaker_not_visible(self):
+        only_visible = FakeTrack(1, size=0.1, score=0.05)
+        chosen = choose_speaker([only_visible], current_speaker_id=0, speech_active=False)
+        self.assertEqual(chosen.id, 1)
+
 
 class BodyAnchorPointTest(unittest.TestCase):
     def test_needs_at_least_two_visible_landmarks(self):
@@ -136,6 +153,48 @@ class ResolveFallbackPointTest(unittest.TestCase):
     def test_holds_last_known_when_no_body_point(self):
         point = resolve_fallback_point(0.0, body_point=None, last_point={"centerX": 0.7, "centerY": 0.4})
         self.assertEqual(point, {"centerX": 0.7, "centerY": 0.4})
+
+
+class ResolveCropPointTest(unittest.TestCase):
+    def test_no_visible_tracks_returns_none_none(self):
+        point, chosen = resolve_crop_point([], current_speaker_id=None)
+        self.assertIsNone(point)
+        self.assertIsNone(chosen)
+
+    def test_clear_winner_delegates_to_choose_speaker(self):
+        quiet = FakeTrack(0, size=0.1, score=0.02)
+        clear_winner = FakeTrack(1, size=0.1, score=0.30)
+        clear_winner.cx, clear_winner.cy = 0.7, 0.4
+        quiet.cx, quiet.cy = 0.2, 0.2
+        point, chosen = resolve_crop_point([quiet, clear_winner], current_speaker_id=None)
+        self.assertEqual(chosen.id, 1)
+        self.assertEqual(point, {"cx": 0.7, "cy": 0.4})
+
+    def test_comparably_active_tracks_widen_to_midpoint_and_pick_no_single_track(self):
+        a = FakeTrack(0, size=0.1, score=0.20)
+        b = FakeTrack(1, size=0.1, score=0.19)  # within AMBIGUOUS_ACTIVITY_MARGIN of a
+        a.cx, a.cy = 0.2, 0.5
+        b.cx, b.cy = 0.8, 0.5
+        point, chosen = resolve_crop_point([a, b], current_speaker_id=None)
+        self.assertIsNone(chosen)  # no single track attributed -- caller must not update current_speaker_id
+        self.assertAlmostEqual(point["cx"], 0.5)
+        self.assertAlmostEqual(point["cy"], 0.5)
+
+    def test_both_silent_does_not_spuriously_widen(self):
+        a = FakeTrack(0, size=0.1, score=0.0)
+        b = FakeTrack(1, size=0.12, score=0.0)
+        a.cx, a.cy = 0.3, 0.3
+        b.cx, b.cy = 0.6, 0.6
+        point, chosen = resolve_crop_point([a, b], current_speaker_id=None)
+        self.assertIsNotNone(chosen)  # falls through to the largest-face fallback, not a midpoint
+
+    def test_speech_inactive_suppresses_widening(self):
+        a = FakeTrack(0, size=0.1, score=0.20)
+        b = FakeTrack(1, size=0.1, score=0.19)
+        a.cx, a.cy = 0.2, 0.5
+        b.cx, b.cy = 0.8, 0.5
+        point, chosen = resolve_crop_point([a, b], current_speaker_id=None, speech_active=False)
+        self.assertIsNotNone(chosen)  # gated choose_speaker path, not the ambiguous-widen path
 
 
 class ShouldResetForCutTest(unittest.TestCase):
@@ -168,6 +227,85 @@ class SmoothPointsTest(unittest.TestCase):
         smoothed = smooth_points(points)
         self.assertEqual(smoothed[0]["centerX"], 0.2)
         self.assertEqual(smoothed[1]["centerX"], 0.8)
+
+    def test_whittaker_smoothing_reduces_jitter_across_a_longer_shot(self):
+        # A noisy oscillation around 0.5 -- non-causal, whole-shot smoothing
+        # (unlike the old 3-point causal average) should meaningfully flatten
+        # this, since it can see the entire shot's shape at once.
+        points = [
+            {"timeSec": i * 0.1, "centerX": 0.5 + (0.15 if i % 2 == 0 else -0.15), "centerY": 0.5, "shotId": 0}
+            for i in range(20)
+        ]
+        smoothed = smooth_points(points)
+        raw_variance = sum((p["centerX"] - 0.5) ** 2 for p in points) / len(points)
+        smoothed_variance = sum((p["centerX"] - 0.5) ** 2 for p in smoothed) / len(smoothed)
+        self.assertLess(smoothed_variance, raw_variance * 0.5)
+
+    def test_smoothing_never_exceeds_the_shots_own_raw_range(self):
+        points = [
+            {"timeSec": i * 0.1, "centerX": 0.5 + (0.2 if i % 3 == 0 else -0.1), "centerY": 0.5, "shotId": 0}
+            for i in range(15)
+        ]
+        smoothed = smooth_points(points)
+        raw_values = [p["centerX"] for p in points]
+        lo, hi = min(raw_values), max(raw_values)
+        for point in smoothed:
+            self.assertGreaterEqual(point["centerX"], lo - 1e-6)
+            self.assertLessEqual(point["centerX"], hi + 1e-6)
+
+    def test_short_shot_below_fit_minimum_passes_through_unchanged(self):
+        points = [
+            {"timeSec": 0.0, "centerX": 0.3, "centerY": 0.4, "shotId": 0},
+            {"timeSec": 0.1, "centerX": 0.7, "centerY": 0.6, "shotId": 0},
+        ]
+        smoothed = smooth_points(points)
+        self.assertEqual(smoothed[0]["centerX"], 0.3)
+        self.assertEqual(smoothed[1]["centerX"], 0.7)
+
+
+class ApplyDeadZoneTest(unittest.TestCase):
+    def test_small_drift_within_zone_holds_the_committed_center(self):
+        points = [
+            {"timeSec": 0.0, "centerX": 0.5, "centerY": 0.5, "shotId": 0},
+            {"timeSec": 0.1, "centerX": 0.55, "centerY": 0.5, "shotId": 0},  # within 0.20 half-width
+        ]
+        result = apply_dead_zone(points)
+        self.assertEqual(result[1]["centerX"], 0.5)
+
+    def test_large_drift_outside_zone_recenters(self):
+        points = [
+            {"timeSec": 0.0, "centerX": 0.5, "centerY": 0.5, "shotId": 0},
+            {"timeSec": 0.1, "centerX": 0.9, "centerY": 0.5, "shotId": 0},  # outside 0.20 half-width
+        ]
+        result = apply_dead_zone(points)
+        self.assertEqual(result[1]["centerX"], 0.9)
+
+    def test_resets_committed_center_at_a_new_shot(self):
+        points = [
+            {"timeSec": 0.0, "centerX": 0.5, "centerY": 0.5, "shotId": 0},
+            {"timeSec": 0.1, "centerX": 0.9, "centerY": 0.5, "shotId": 1},  # new shot -- must not be treated as drift
+        ]
+        result = apply_dead_zone(points)
+        self.assertEqual(result[1]["centerX"], 0.9)
+
+
+class SpeechIntervalsTest(unittest.TestCase):
+    def test_parse_speech_intervals_handles_empty_and_malformed_input(self):
+        self.assertIsNone(parse_speech_intervals(""))
+        self.assertIsNone(parse_speech_intervals(None))
+        self.assertIsNone(parse_speech_intervals("garbage,,1.5"))
+
+    def test_parse_speech_intervals_parses_valid_pairs(self):
+        self.assertEqual(parse_speech_intervals("1.0-2.5,4.0-6.25"), [(1.0, 2.5), (4.0, 6.25)])
+
+    def test_is_speech_active_true_when_no_signal_available(self):
+        self.assertTrue(is_speech_active(5.0, None))
+
+    def test_is_speech_active_respects_intervals_with_padding(self):
+        intervals = [(2.0, 4.0)]
+        self.assertTrue(is_speech_active(3.0, intervals))
+        self.assertTrue(is_speech_active(1.9, intervals))  # inside default 0.15s padding
+        self.assertFalse(is_speech_active(1.0, intervals))
 
 
 if __name__ == "__main__":
