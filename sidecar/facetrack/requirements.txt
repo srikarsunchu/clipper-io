@@ -1,0 +1,11 @@
+mediapipe==1.0.0
+numpy==2.5.1
+scenedetect==0.7.1
+# scenedetect pulls in plain opencv-python as a transitive dependency; pip
+# doesn't treat it as satisfied by opencv-contrib-python (different PyPI
+# packages, same "cv2" import name), so both end up installed side by side.
+# That's the tested-working configuration on this machine -- pinning all three
+# here rather than fighting opencv's packaging split.
+opencv-contrib-python==5.0.0.93
+opencv-python==5.0.0.93
+opencv-python-headless==5.0.0.93
