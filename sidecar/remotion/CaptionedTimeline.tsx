@@ -3,13 +3,13 @@ import { AbsoluteFill, OffthreadVideo, Sequence, interpolate, spring, useCurrent
 import { loadFont as loadAnton } from "@remotion/google-fonts/Anton";
 import { loadFont as loadInter } from "@remotion/google-fonts/Inter";
 import { loadFont as loadPoppins } from "@remotion/google-fonts/Poppins";
-import type { CaptionStyleId, RenderCue, RenderSegment } from "../../shared/render-contract.js";
+import type { CaptionStyleId, RenderCue, RenderSegment } from "../../shared/render-contract";
 // Single shared interpolation implementation -- the live preview (app/page.tsx)
 // uses this exact function too, so a given point in time can never resolve
 // differently between preview and export.
-import { interpolateFacePoint } from "../../shared/timeline-math.js";
+import { interpolateFacePoint } from "../../shared/timeline-math";
 
-export type { CaptionStyleId, RenderCue, RenderFacePoint, RenderFaceRange, RenderSegment } from "../../shared/render-contract.js";
+export type { CaptionStyleId, RenderCue, RenderFacePoint, RenderFaceRange, RenderSegment } from "../../shared/render-contract";
 
 const { fontFamily: antonFont } = loadAnton("normal", { weights: ["400"], subsets: ["latin"] });
 const { fontFamily: interFont } = loadInter("normal", { weights: ["800"], subsets: ["latin"] });
