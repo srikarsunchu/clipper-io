@@ -1,5 +1,5 @@
 import type { Project, ProjectSummary } from "../shared/timeline";
-import type { CaptionStyleId, RenderCue, RenderFacePoint, RenderFaceRange } from "../shared/render-contract";
+import type { CaptionStyleId } from "../shared/render-contract";
 import type {
   FindMomentsRequest,
   FindMomentsResponse,
@@ -65,21 +65,15 @@ export function transcribeMedia(projectId: string, mediaId: string): Promise<Pro
   }).then((response) => asJson<Project>(response));
 }
 
+// The server derives the full render plan from the stored project via
+// buildRenderPlan -- the client only needs to say how, not hand-assemble
+// segments/cues/face-track data itself (that duplication is exactly what let
+// preview and export drift apart before).
 export interface RenderRequest {
   style: CaptionStyleId;
   width: number;
   height: number;
   fps: number;
-  durationSec: number;
-  segments: {
-    mediaId: string;
-    trimStartSec: number;
-    trimEndSec: number;
-    sequenceStartSec: number;
-    facePoints: RenderFacePoint[];
-    faceCoverage: RenderFaceRange[];
-  }[];
-  cues: RenderCue[];
 }
 
 export function renderProject(projectId: string, request: RenderRequest): Promise<{ renderId: string; downloadUrl: string }> {

@@ -6,7 +6,8 @@ import multer from "multer";
 import { nanoid } from "nanoid";
 import { getMediaFile, getProject, registerMediaFile, saveProject, storageDir } from "../db.js";
 import { probeMedia } from "../ffprobe.js";
-import type { Clip, MediaAsset } from "../../../shared/timeline.js";
+import type { AssetProvenance, MediaAsset, TimelineItem } from "../../../shared/timeline.js";
+import { clipDuration } from "../../../shared/timeline-math.js";
 
 const mediaDir = path.join(storageDir, "media");
 
@@ -39,6 +40,7 @@ projectMediaRouter.post("/:id/media", upload.single("file"), async (req, res) =>
     const isImage = req.file.mimetype.startsWith("image/");
     const isAudio = req.file.mimetype.startsWith("audio/");
     const durationSec = isImage ? 5 : probed.durationSec;
+    const provenance: AssetProvenance = { sourceType: "upload" };
     const media: MediaAsset = {
       id: mediaId,
       fileName: req.file.originalname,
@@ -49,32 +51,29 @@ projectMediaRouter.post("/:id/media", upload.single("file"), async (req, res) =>
       fps: probed.fps,
       hasAudio: probed.hasAudio,
       createdAt: new Date().toISOString(),
+      provenance,
     };
     registerMediaFile(mediaId, project.id, req.file.path, req.file.mimetype);
 
     const targetTrack = project.tracks.find((track) => track.kind === (isAudio ? "audio" : "video"));
     const trackEnd = targetTrack
       ? project.clips
-          .filter((clip) => clip.trackId === targetTrack.id)
-          .reduce((max, clip) => Math.max(max, clip.startSec + (clip.outSec - clip.inSec)), 0)
+          .filter((item) => item.trackId === targetTrack.id)
+          .reduce((max, item) => Math.max(max, item.startSec + clipDuration(item)), 0)
       : 0;
 
-    const clip: Clip = targetTrack
-      ? {
-          id: nanoid(),
-          trackId: targetTrack.id,
-          mediaId,
-          kind: isImage ? "image" : isAudio ? "audio" : "media",
-          inSec: 0,
-          outSec: durationSec,
-          startSec: trackEnd,
-        }
-      : ({} as Clip);
+    const newItem: TimelineItem | null = !targetTrack
+      ? null
+      : isImage
+        ? { id: nanoid(), trackId: targetTrack.id, kind: "image", assetId: mediaId, startSec: trackEnd, durationSec, fit: "cover" }
+        : isAudio
+          ? { id: nanoid(), trackId: targetTrack.id, kind: "audio", assetId: mediaId, startSec: trackEnd, durationSec, trimInSec: 0, trimOutSec: durationSec, volume: 1 }
+          : { id: nanoid(), trackId: targetTrack.id, kind: "video", assetId: mediaId, startSec: trackEnd, durationSec, trimInSec: 0, trimOutSec: durationSec, fit: "cover" };
 
     const updated = {
       ...project,
       media: [...project.media, media],
-      clips: targetTrack ? [...project.clips, clip] : project.clips,
+      clips: newItem ? [...project.clips, newItem] : project.clips,
       updatedAt: new Date().toISOString(),
     };
     saveProject(updated);

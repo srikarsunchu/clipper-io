@@ -46,3 +46,9 @@ next-env.d.ts
 /sidecar/node_modules
 /sidecar/storage/
 /sidecar/facetrack/venv/
+
+# unrelated repo that appears in this working directory -- not part of Clipwire
+/aura/
+
+# python bytecode cache
+__pycache__/

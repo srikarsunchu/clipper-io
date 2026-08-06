@@ -1,7 +1,6 @@
 import type { AiGeneration } from "./ai-edit";
 
 export type TrackKind = "video" | "caption" | "broll" | "audio";
-export type TimelineItemKind = "media" | "image" | "text" | "audio" | "generated";
 
 export interface MediaAsset {
   id: string;
@@ -13,25 +12,110 @@ export interface MediaAsset {
   fps: number;
   hasAudio: boolean;
   createdAt: string;
+  /** How this asset came to exist. Every generated output enters the same
+   * asset system as uploaded media, so origin is recorded on the asset, not
+   * invented as a separate render-behavior "kind" on timeline items. Missing
+   * on legacy assets normalizes to `sourceType: "upload"` -- nothing has ever
+   * been generated in this project yet. */
+  provenance?: AssetProvenance;
 }
 
-export interface ClipTransform {
+export interface AssetProvenance {
+  sourceType: "upload" | "generated" | "stock" | "derived";
+  provider?: string;
+  model?: string;
+  promptHash?: string;
+  generationJobId?: string;
+  parentAssetId?: string;
+  referenceAssetIds?: string[];
+}
+
+export interface ItemTransform {
   scale: number;
   x: number;
   y: number;
 }
 
+/** @deprecated kept only so ClipTransform-typed values already persisted in
+ * old projects still parse; identical shape to ItemTransform. */
+export type ClipTransform = ItemTransform;
+
+export type ItemFit = "cover" | "contain";
+
+interface TimelineItemBase {
+  id: string;
+  trackId: string;
+  /** position of this item on the timeline, seconds */
+  startSec: number;
+  /** how long this item occupies the timeline, seconds -- the single source
+   * of truth for duration across every item kind (for video/audio this must
+   * stay in sync with trimInSec/trimOutSec; helpers in timeline-math enforce
+   * that rather than callers computing it by hand in two places). */
+  durationSec: number;
+  /** set when this item was materialized from an approved storyboard scene;
+   * lets a future regeneration replace only the items bound to that scene. */
+  sceneId?: string;
+  transform?: ItemTransform;
+  opacity?: number;
+  /** explicit stacking override within a track; defaults to track order when absent. */
+  layerOrder?: number;
+}
+
+export interface VideoItem extends TimelineItemBase {
+  kind: "video";
+  assetId: string;
+  /** trim in-point within the source asset, seconds */
+  trimInSec: number;
+  /** trim out-point within the source asset, seconds */
+  trimOutSec: number;
+  fit?: ItemFit;
+  muted?: boolean;
+  volume?: number;
+}
+
+export interface ImageItem extends TimelineItemBase {
+  kind: "image";
+  assetId: string;
+  fit?: ItemFit;
+  motionPreset?: "kenBurnsIn" | "kenBurnsOut" | "none";
+}
+
+export interface TextItem extends TimelineItemBase {
+  kind: "text";
+  text: string;
+  typography?: {
+    fontFamily?: string;
+    fontSize?: number;
+    color?: string;
+    weight?: number;
+  };
+  alignment?: "left" | "center" | "right";
+  animationPreset?: string;
+}
+
+export interface AudioItem extends TimelineItemBase {
+  kind: "audio";
+  assetId: string;
+  trimInSec: number;
+  trimOutSec: number;
+  volume?: number;
+  fades?: { inSec?: number; outSec?: number };
+  ducking?: { enabled?: boolean; duckDb?: number };
+}
+
+export type TimelineItem = VideoItem | ImageItem | TextItem | AudioItem;
+
+/** @deprecated pre-v2 shape. `normalizeProject` migrates every persisted
+ * `Clip` into a `VideoItem` (the only kind that ever existed before v2) on
+ * read; nothing new is ever written in this shape. Kept only so legacy JSON
+ * still parses/type-checks during migration. */
 export interface Clip {
   id: string;
   trackId: string;
   mediaId: string;
-  /** Placed-item discriminator. Missing values from legacy projects normalize to `media`. */
-  kind?: TimelineItemKind;
-  /** trim in-point within the source media, seconds */
+  kind?: "media" | "image" | "text" | "audio" | "generated";
   inSec: number;
-  /** trim out-point within the source media, seconds */
   outSec: number;
-  /** position of this clip on the timeline, seconds */
   startSec: number;
   transform?: ClipTransform;
 }
@@ -74,7 +158,9 @@ export interface MediaFaceTrack {
 }
 
 export interface Project {
-  /** JSON project schema. Legacy projects without this field are version 1. */
+  /** JSON project schema. Legacy projects without this field are version 1
+   * (`Clip[]` timeline). Version 2 uses the discriminated `TimelineItem[]`
+   * timeline; `normalizeProject` migrates 1 -> 2 on every read. */
   schemaVersion?: number;
   id: string;
   name: string;
@@ -82,7 +168,10 @@ export interface Project {
   updatedAt: string;
   media: MediaAsset[];
   tracks: Track[];
-  clips: Clip[];
+  /** v2: discriminated timeline items. Pre-migration (v1) persisted JSON has
+   * `Clip[]` here instead -- `normalizeProject` is the only place that should
+   * ever see that shape. */
+  clips: TimelineItem[];
   transcript: TranscriptWord[] | null;
   /** which media asset `transcript` was generated from, since word timestamps are source-media-relative */
   transcriptMediaId: string | null;
@@ -99,7 +188,7 @@ export interface Project {
   /** Persisted AI candidate sets, newest last. */
   aiGenerations?: AiGeneration[];
   /** Original timeline retained before the first AI candidate is applied. */
-  sourceTimelineSnapshot?: Clip[] | null;
+  sourceTimelineSnapshot?: TimelineItem[] | null;
 }
 
 export interface ProjectSummary {

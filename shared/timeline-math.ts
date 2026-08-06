@@ -1,4 +1,14 @@
-import type { Clip, FaceTrackPoint, FaceTrackRange, MediaFaceTrack, Project, TranscriptWord } from "./timeline";
+import type {
+  Clip,
+  FaceTrackPoint,
+  FaceTrackRange,
+  ItemTransform,
+  MediaFaceTrack,
+  Project,
+  TimelineItem,
+  TranscriptWord,
+  VideoItem,
+} from "./timeline";
 import type { RenderCue, RenderFacePoint, RenderFaceRange } from "./render-contract";
 
 export interface CaptionCue {
@@ -14,17 +24,33 @@ export interface EditCaptionCue extends CaptionCue {
   sourceEnd: number;
 }
 
-export function clipDuration(clip: Clip): number {
-  return Math.max(0, clip.outSec - clip.inSec);
+export function isVideoItem(item: TimelineItem): item is VideoItem {
+  return item.kind === "video";
 }
 
-export function timelineDuration(clips: Clip[]): number {
-  return clips.reduce((duration, clip) => Math.max(duration, clip.startSec + clipDuration(clip)), 0);
+/** The only place a video/audio item's trim should be changed -- keeps
+ * `durationSec` (the single cross-kind source of truth for how long an item
+ * occupies the timeline) in sync with the trim points automatically, rather
+ * than relying on every caller to remember to update both. */
+export function withVideoTrim(item: VideoItem, trimInSec: number, trimOutSec: number): VideoItem {
+  return { ...item, trimInSec, trimOutSec, durationSec: Math.max(0, trimOutSec - trimInSec) };
 }
 
-export function findClipAtTime(clips: Clip[], time: number): Clip | null {
-  if (!clips.length) return null;
-  return clips.find((clip) => time >= clip.startSec && time < clip.startSec + clipDuration(clip)) ?? null;
+/** Generic timeline-position duration -- valid for every item kind, since
+ * `durationSec` is the single source of truth regardless of what the item
+ * actually is. Kept as its own function (rather than inlining `.durationSec`
+ * everywhere) so call sites read the same either way old Clip-based code did. */
+export function clipDuration(item: TimelineItem): number {
+  return Math.max(0, item.durationSec);
+}
+
+export function timelineDuration(items: TimelineItem[]): number {
+  return items.reduce((duration, item) => Math.max(duration, item.startSec + clipDuration(item)), 0);
+}
+
+export function findClipAtTime(items: TimelineItem[], time: number): TimelineItem | null {
+  if (!items.length) return null;
+  return items.find((item) => time >= item.startSec && time < item.startSec + clipDuration(item)) ?? null;
 }
 
 /** Merges transcript words into contiguous speech-active intervals -- gaps
@@ -75,20 +101,20 @@ export function buildCaptionCues(words: TranscriptWord[]): CaptionCue[] {
 
 export function mapCuesToEditTime(
   cues: CaptionCue[],
-  clips: Clip[],
+  items: TimelineItem[],
   transcriptMediaId: string | null,
 ): EditCaptionCue[] {
   if (!transcriptMediaId) return [];
   const mapped: EditCaptionCue[] = [];
-  for (const clip of clips.filter((candidate) => candidate.mediaId === transcriptMediaId)) {
+  for (const item of items.filter(isVideoItem).filter((candidate) => candidate.assetId === transcriptMediaId)) {
     for (const cue of cues) {
-      const overlapStart = Math.max(cue.start, clip.inSec);
-      const overlapEnd = Math.min(cue.end, clip.outSec);
+      const overlapStart = Math.max(cue.start, item.trimInSec);
+      const overlapEnd = Math.min(cue.end, item.trimOutSec);
       if (overlapEnd <= overlapStart) continue;
       mapped.push({
         ...cue,
-        editStart: clip.startSec + overlapStart - clip.inSec,
-        editEnd: clip.startSec + overlapEnd - clip.inSec,
+        editStart: item.startSec + overlapStart - item.trimInSec,
+        editEnd: item.startSec + overlapEnd - item.trimInSec,
         sourceStart: overlapStart,
         sourceEnd: overlapEnd,
       });
@@ -111,16 +137,16 @@ export function buildRenderCues(editCues: EditCaptionCue[]): RenderCue[] {
 }
 
 /** Maps a single media's tracked points into edit-time for whichever of the
- * given clips reference that exact media -- clips for any other media are
- * ignored, so a caller can never accidentally get media A's points back out
- * under media B's identity by passing the wrong clip list. */
-export function mapFaceTrackToEditTime(points: FaceTrackPoint[], clips: Clip[], mediaId: string): RenderFacePoint[] {
+ * given items reference that exact media -- items for any other media (or
+ * non-video items) are ignored, so a caller can never accidentally get media
+ * A's points back out under media B's identity by passing the wrong item list. */
+export function mapFaceTrackToEditTime(points: FaceTrackPoint[], items: TimelineItem[], mediaId: string): RenderFacePoint[] {
   const mapped: RenderFacePoint[] = [];
-  for (const clip of clips.filter((candidate) => candidate.mediaId === mediaId)) {
+  for (const item of items.filter(isVideoItem).filter((candidate) => candidate.assetId === mediaId)) {
     for (const point of points) {
-      if (point.timeSec < clip.inSec || point.timeSec > clip.outSec) continue;
+      if (point.timeSec < item.trimInSec || point.timeSec > item.trimOutSec) continue;
       mapped.push({
-        editTimeSec: clip.startSec + point.timeSec - clip.inSec,
+        editTimeSec: item.startSec + point.timeSec - item.trimInSec,
         centerX: point.centerX,
         centerY: point.centerY,
       });
@@ -133,16 +159,16 @@ export function mapFaceTrackToEditTime(points: FaceTrackPoint[], clips: Clip[], 
  * ranges rather than the points themselves -- lets interpolation tell "no one
  * tracked this part of the clip" apart from "tracked, and the face happened to
  * sit at the nearest known point." */
-export function mapFaceRangesToEditTime(ranges: FaceTrackRange[], clips: Clip[], mediaId: string): RenderFaceRange[] {
+export function mapFaceRangesToEditTime(ranges: FaceTrackRange[], items: TimelineItem[], mediaId: string): RenderFaceRange[] {
   const mapped: RenderFaceRange[] = [];
-  for (const clip of clips.filter((candidate) => candidate.mediaId === mediaId)) {
+  for (const item of items.filter(isVideoItem).filter((candidate) => candidate.assetId === mediaId)) {
     for (const range of ranges) {
-      const overlapStart = Math.max(range.startSec, clip.inSec);
-      const overlapEnd = Math.min(range.endSec, clip.outSec);
+      const overlapStart = Math.max(range.startSec, item.trimInSec);
+      const overlapEnd = Math.min(range.endSec, item.trimOutSec);
       if (overlapEnd <= overlapStart) continue;
       mapped.push({
-        startSec: clip.startSec + overlapStart - clip.inSec,
-        endSec: clip.startSec + overlapEnd - clip.inSec,
+        startSec: item.startSec + overlapStart - item.trimInSec,
+        endSec: item.startSec + overlapEnd - item.trimInSec,
       });
     }
   }
@@ -293,17 +319,45 @@ export function snapTime(value: number, candidates: number[], thresholdSec: numb
   return result;
 }
 
-export function clampClipStart(clip: Clip, proposedStart: number, trackClips: Clip[]): number {
-  const duration = clipDuration(clip);
-  const others = trackClips.filter((candidate) => candidate.id !== clip.id).sort((a, b) => a.startSec - b.startSec);
+export function clampClipStart(item: TimelineItem, proposedStart: number, trackItems: TimelineItem[]): number {
+  const duration = clipDuration(item);
+  const others = trackItems.filter((candidate) => candidate.id !== item.id).sort((a, b) => a.startSec - b.startSec);
   let start = Math.max(0, proposedStart);
   for (const other of others) {
     const otherEnd = other.startSec + clipDuration(other);
     if (start < otherEnd && start + duration > other.startSec) {
-      start = proposedStart >= clip.startSec ? otherEnd : Math.max(0, other.startSec - duration);
+      start = proposedStart >= item.startSec ? otherEnd : Math.max(0, other.startSec - duration);
     }
   }
   return start;
+}
+
+/** Schema v1 -> v2 migration: the old `Clip` shape (mediaId/inSec/outSec, no
+ * durationSec) becomes a `VideoItem` (assetId/trimInSec/trimOutSec, explicit
+ * durationSec). Every clip that ever existed before v2 was a video placement
+ * -- v1's optional `kind` field was never populated with anything but "media"
+ * in practice, so any non-"media" legacy value still migrates to a VideoItem
+ * (the only shape v1's fields actually support) rather than being dropped. */
+function migrateClipToTimelineItem(clip: Clip): VideoItem {
+  return {
+    id: clip.id,
+    trackId: clip.trackId,
+    kind: "video",
+    assetId: clip.mediaId,
+    trimInSec: clip.inSec,
+    trimOutSec: clip.outSec,
+    startSec: clip.startSec,
+    durationSec: Math.max(0, clip.outSec - clip.inSec),
+    transform: clip.transform as ItemTransform | undefined,
+  };
+}
+
+function isLegacyClip(value: Clip | TimelineItem): value is Clip {
+  return !("durationSec" in value);
+}
+
+function migrateTimelineItems(items: (Clip | TimelineItem)[] | undefined): TimelineItem[] {
+  return (items ?? []).map((item) => (isLegacyClip(item) ? migrateClipToTimelineItem(item) : item));
 }
 
 export function normalizeProject(project: Project): Project {
@@ -325,10 +379,13 @@ export function normalizeProject(project: Project): Project {
 
   return {
     ...project,
-    schemaVersion: project.schemaVersion ?? 1,
-    media: project.media ?? [],
+    schemaVersion: 2,
+    media: (project.media ?? []).map((asset) => ({
+      ...asset,
+      provenance: asset.provenance ?? { sourceType: "upload" },
+    })),
     tracks: (project.tracks ?? []).map((track, order) => ({ ...track, order: track.order ?? order })),
-    clips: (project.clips ?? []).map((clip) => ({ ...clip, kind: clip.kind ?? "media" })),
+    clips: migrateTimelineItems(project.clips as unknown as (Clip | TimelineItem)[]),
     transcript: project.transcript ?? null,
     transcriptMediaId: project.transcriptMediaId ?? null,
     faceTrack: project.faceTrack ?? null,
@@ -336,7 +393,7 @@ export function normalizeProject(project: Project): Project {
     faceTracksByMediaId,
     aiGenerations: project.aiGenerations ?? [],
     sourceTimelineSnapshot: project.sourceTimelineSnapshot
-      ? project.sourceTimelineSnapshot.map((clip) => ({ ...clip, kind: clip.kind ?? "media" }))
+      ? migrateTimelineItems(project.sourceTimelineSnapshot as unknown as (Clip | TimelineItem)[])
       : null,
   };
 }

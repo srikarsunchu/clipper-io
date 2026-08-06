@@ -9,11 +9,13 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { Clip, MediaAsset, Track } from "../../../shared/timeline";
+import type { MediaAsset, TimelineItem, Track } from "../../../shared/timeline";
 import {
   clampClipStart,
   clipDuration,
+  isVideoItem,
   snapTime,
+  withVideoTrim,
   type EditCaptionCue,
 } from "../../../shared/timeline-math";
 import { mediaFileUrl } from "../../sidecar-client";
@@ -32,7 +34,7 @@ interface DragState {
   clipId: string;
   mode: DragMode;
   pointerX: number;
-  original: Clip;
+  original: TimelineItem;
 }
 
 export interface TimelineProps {
@@ -45,11 +47,11 @@ export interface TimelineProps {
   deleteClip: () => void;
   totalDuration: number;
   tracks: Track[];
-  clips: Clip[];
+  clips: TimelineItem[];
   mediaById: Map<string, MediaAsset>;
   activeClipId: string | null;
   editCaptionCues: EditCaptionCue[];
-  onUpdateClips: (clips: Clip[]) => Promise<void>;
+  onUpdateClips: (clips: TimelineItem[]) => Promise<void>;
 }
 
 export function Timeline({
@@ -192,7 +194,7 @@ export function Timeline({
     }
   }
 
-  function beginDrag(event: ReactPointerEvent, clip: Clip, mode: DragMode) {
+  function beginDrag(event: ReactPointerEvent, clip: TimelineItem, mode: DragMode) {
     event.stopPropagation();
     const item = event.currentTarget.closest(".timeline-media-item") as HTMLElement | null;
     item?.setPointerCapture(event.pointerId);
@@ -224,30 +226,34 @@ export function Timeline({
           const proposed = snapping ? snapTime(rawStart, candidates, threshold) : rawStart;
           return { ...clip, startSec: clampClipStart(clip, proposed, trackClips) };
         }
+        // Trimming only has meaning for items with a source trim window --
+        // image/text items don't have one yet (that UI lands in Phase 1), so
+        // leave them untouched rather than reading fields they don't have.
+        if (!isVideoItem(clip) || !isVideoItem(drag.original)) return clip;
         if (drag.mode === "trim-start") {
           const maxDelta = clipDuration(drag.original) - 0.1;
-          let trimDelta = Math.max(-drag.original.inSec, Math.min(maxDelta, delta));
+          let trimDelta = Math.max(-drag.original.trimInSec, Math.min(maxDelta, delta));
           const rawStart = drag.original.startSec + trimDelta;
           const snappedStart = snapping ? snapTime(rawStart, candidates, threshold) : rawStart;
           trimDelta = snappedStart - drag.original.startSec;
           const adjustedStart = clampClipStart(clip, Math.max(0, snappedStart), trackClips);
           return {
-            ...clip,
+            ...withVideoTrim(clip, Math.max(0, drag.original.trimInSec + adjustedStart - drag.original.startSec), clip.trimOutSec),
             startSec: adjustedStart,
-            inSec: Math.max(0, drag.original.inSec + adjustedStart - drag.original.startSec),
           };
         }
-        const mediaDuration = mediaById.get(clip.mediaId)?.durationSec ?? Number.POSITIVE_INFINITY;
-        const rawOut = Math.max(drag.original.inSec + 0.1, Math.min(mediaDuration, drag.original.outSec + delta));
-        const timelineEnd = drag.original.startSec + (rawOut - drag.original.inSec);
+        const mediaDuration = mediaById.get(clip.assetId)?.durationSec ?? Number.POSITIVE_INFINITY;
+        const rawOut = Math.max(drag.original.trimInSec + 0.1, Math.min(mediaDuration, drag.original.trimOutSec + delta));
+        const timelineEnd = drag.original.startSec + (rawOut - drag.original.trimInSec);
         const snappedEnd = snapping ? snapTime(timelineEnd, candidates, threshold) : timelineEnd;
-        return {
-          ...clip,
-          outSec: Math.max(
-            drag.original.inSec + 0.1,
-            Math.min(mediaDuration, drag.original.inSec + snappedEnd - drag.original.startSec),
+        return withVideoTrim(
+          clip,
+          clip.trimInSec,
+          Math.max(
+            drag.original.trimInSec + 0.1,
+            Math.min(mediaDuration, drag.original.trimInSec + snappedEnd - drag.original.startSec),
           ),
-        };
+        );
       });
       draftClipsRef.current = next;
       return next;
@@ -452,7 +458,7 @@ export function Timeline({
                           <TimelineClip
                             key={clip.id}
                             clip={clip}
-                            media={mediaById.get(clip.mediaId)}
+                            media={isVideoItem(clip) ? mediaById.get(clip.assetId) : undefined}
                             pxPerSecond={pxPerSecond}
                             selected={clip.id === activeClipId}
                             onPointerDown={(event) => beginDrag(event, clip, "move")}
@@ -499,7 +505,7 @@ function TimelineClip({
   onTrimStart,
   onTrimEnd,
 }: {
-  clip: Clip;
+  clip: TimelineItem;
   media?: MediaAsset;
   pxPerSecond: number;
   selected: boolean;

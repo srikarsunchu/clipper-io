@@ -3,7 +3,7 @@
 
 import type { RefObject } from "react";
 import type { CaptionStyleId } from "../../shared/render-contract";
-import type { Clip, MediaAsset } from "../../shared/timeline";
+import type { MediaAsset, VideoItem } from "../../shared/timeline";
 import type { CaptionCue } from "../../shared/timeline-math";
 import { mediaFileUrl } from "../sidecar-client";
 
@@ -56,7 +56,7 @@ export function PreviewStage({
   onVideoTimeUpdate,
   onVideoEnded,
 }: {
-  activeClip: Clip | null;
+  activeClip: VideoItem | null;
   activeMedia: MediaAsset | null;
   videoRef: RefObject<HTMLVideoElement | null>;
   layout: Layout;

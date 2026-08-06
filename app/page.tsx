@@ -1,13 +1,13 @@
 "use client";
 
 import { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { Clip, Project } from "../shared/timeline";
+import type { Project, TimelineItem, VideoItem } from "../shared/timeline";
 import type { CaptionStyleId } from "../shared/render-contract";
 import {
   buildCaptionCues,
-  buildRenderCues,
   findClipAtTime as findClipAtTimelineTime,
   interpolateFacePoint,
+  isVideoItem,
   mapFaceRangesToEditTime,
   mapFaceTrackToEditTime,
   mapCuesToEditTime,
@@ -15,6 +15,7 @@ import {
   readMediaFaceTrack,
   subtractRanges,
   timelineDuration as getTimelineDuration,
+  withVideoTrim,
   type CaptionCue,
 } from "../shared/timeline-math";
 import { createProject, fetchProject, saveProjectTimeline, transcribeMedia, uploadMedia, renderProject, renderDownloadUrl, findMoments, trackFaces, type FindMomentsPreferences, type MomentCandidate } from "./sidecar-client";
@@ -56,21 +57,20 @@ export default function EditorPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const videoTrack = project?.tracks.find((track) => track.kind === "video") ?? null;
-  const videoClips = useMemo(
+  const videoClips: VideoItem[] = useMemo(
     () =>
       project && videoTrack
-        ? project.clips.filter((clip) => clip.trackId === videoTrack.id).sort((a, b) => a.startSec - b.startSec)
+        ? project.clips.filter((clip): clip is VideoItem => isVideoItem(clip) && clip.trackId === videoTrack.id).sort((a, b) => a.startSec - b.startSec)
         : [],
     [project, videoTrack]
   );
   const mediaById = useMemo(() => new Map((project?.media ?? []).map((media) => [media.id, media])), [project]);
   const totalDuration = videoClips.length
-    ? videoClips[videoClips.length - 1].startSec +
-      (videoClips[videoClips.length - 1].outSec - videoClips[videoClips.length - 1].inSec)
+    ? videoClips[videoClips.length - 1].startSec + videoClips[videoClips.length - 1].durationSec
     : 0;
   const projectDuration = getTimelineDuration(project?.clips ?? []);
   const activeClip = videoClips.find((clip) => clip.id === activeClipId) ?? videoClips[0] ?? null;
-  const activeMedia = activeClip ? mediaById.get(activeClip.mediaId) ?? null : null;
+  const activeMedia = activeClip ? mediaById.get(activeClip.assetId) ?? null : null;
 
   const hasTranscriptForActiveMedia = Boolean(
     project?.transcript?.length &&
@@ -85,7 +85,7 @@ export default function EditorPage() {
     () => mapCuesToEditTime(captionCues, videoClips, hasTranscriptForActiveMedia ? project?.transcriptMediaId ?? null : null),
     [captionCues, videoClips, hasTranscriptForActiveMedia, project?.transcriptMediaId]
   );
-  const sourceTime = activeClip ? activeClip.inSec + (currentTime - activeClip.startSec) : 0;
+  const sourceTime = activeClip ? activeClip.trimInSec + (currentTime - activeClip.startSec) : 0;
   const activeCue = captionCues.find((cue) => sourceTime >= cue.start && sourceTime < cue.end) ?? null;
 
   const activeMediaFaceTrack = useMemo(
@@ -115,8 +115,10 @@ export default function EditorPage() {
     setMoments(latest?.moments ?? []);
   }, [activeMedia, project?.aiGenerations]);
 
-  function findClipAtTime(time: number): Clip | null {
-    return findClipAtTimelineTime(videoClips, time);
+  function findClipAtTime(time: number): VideoItem | null {
+    // videoClips is always VideoItem[], so the generic TimelineItem lookup
+    // always actually returns a VideoItem (or null) here.
+    return findClipAtTimelineTime(videoClips, time) as VideoItem | null;
   }
 
   useEffect(() => {
@@ -184,7 +186,7 @@ export default function EditorPage() {
     // boundary crossing). Depending on currentTime/activeClip here would fire on
     // every native timeupdate tick and fight playback.
     if (!videoRef.current || !activeClip) return;
-    const desiredLocal = activeClip.inSec + Math.max(0, currentTime - activeClip.startSec);
+    const desiredLocal = activeClip.trimInSec + Math.max(0, currentTime - activeClip.startSec);
     videoRef.current.currentTime = desiredLocal;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeClipId]);
@@ -232,8 +234,8 @@ export default function EditorPage() {
   }
 
   async function persistClips(
-    nextClips: Clip[],
-    sourceTimelineSnapshot: Clip[] | null | undefined = project?.sourceTimelineSnapshot,
+    nextClips: TimelineItem[],
+    sourceTimelineSnapshot: TimelineItem[] | null | undefined = project?.sourceTimelineSnapshot,
   ) {
     if (!project) return;
     const updated = { ...project, clips: nextClips, sourceTimelineSnapshot, updatedAt: new Date().toISOString() };
@@ -289,15 +291,20 @@ export default function EditorPage() {
     }
     const transcriptMediaId = activeMedia.id;
     let cursor = 0;
-    const newClips: Clip[] = moment.segments.map((segment) => {
-      const clip: Clip = {
+    const newClips: TimelineItem[] = moment.segments.map((segment) => {
+      // Origin ("this came from an AI moment-detection pass") belongs on the
+      // clip only as a fact about how the placement was produced -- the
+      // underlying asset's own provenance is untouched, since no new asset
+      // was created here, just a different trim of the existing source video.
+      const clip: VideoItem = {
         id: crypto.randomUUID(),
         trackId: videoTrack.id,
-        mediaId: transcriptMediaId,
-        kind: "generated",
-        inSec: segment.startSec,
-        outSec: segment.endSec,
+        kind: "video",
+        assetId: transcriptMediaId,
+        trimInSec: segment.startSec,
+        trimOutSec: segment.endSec,
         startSec: cursor,
+        durationSec: segment.endSec - segment.startSec,
       };
       cursor += segment.endSec - segment.startSec;
       return clip;
@@ -332,17 +339,17 @@ export default function EditorPage() {
       ? project.clips.filter((clip) => clip.trackId === selectedTrack.id)
       : videoClips;
     const clip = findClipAtTimelineTime(candidates, currentTime);
-    if (!clip) {
+    if (!clip || !isVideoItem(clip)) {
       flash("Move the playhead inside a clip to split");
       return;
     }
-    const splitLocal = clip.inSec + (currentTime - clip.startSec);
-    if (splitLocal <= clip.inSec + 0.05 || splitLocal >= clip.outSec - 0.05) {
+    const splitLocal = clip.trimInSec + (currentTime - clip.startSec);
+    if (splitLocal <= clip.trimInSec + 0.05 || splitLocal >= clip.trimOutSec - 0.05) {
       flash("Move the playhead inside a clip to split");
       return;
     }
-    const first: Clip = { ...clip, outSec: splitLocal };
-    const second: Clip = { ...clip, id: crypto.randomUUID(), inSec: splitLocal, startSec: currentTime };
+    const first: VideoItem = withVideoTrim(clip, clip.trimInSec, splitLocal);
+    const second: VideoItem = { ...withVideoTrim(clip, splitLocal, clip.trimOutSec), id: crypto.randomUUID(), startSec: currentTime };
     const nextClips = project.clips.flatMap((existing) => (existing.id === clip.id ? [first, second] : [existing]));
     await persistClips(nextClips);
     flash(`Split added at ${formatTime(currentTime)}`);
@@ -359,7 +366,7 @@ export default function EditorPage() {
       flash("No clip under the playhead");
       return;
     }
-    const removedLen = clip.outSec - clip.inSec;
+    const removedLen = clip.durationSec;
     const nextClips = project.clips
       .filter((existing) => existing.id !== clip.id)
       .map((existing) =>
@@ -387,14 +394,14 @@ export default function EditorPage() {
       // not just the first one -- a multi-source timeline needs its own crop
       // per media, and re-tracking only the ranges that aren't already covered
       // (rather than the whole media every time) keeps repeat exports cheap.
-      const usedMediaIds = Array.from(new Set(videoClips.map((clip) => clip.mediaId)));
+      const usedMediaIds = Array.from(new Set(videoClips.map((clip) => clip.assetId)));
       for (const mediaId of usedMediaIds) {
         const media = mediaById.get(mediaId);
         if (!media || !media.mimeType.startsWith("video/")) continue;
 
         const required = videoClips
-          .filter((clip) => clip.mediaId === mediaId)
-          .map((clip) => ({ startSec: clip.inSec, endSec: clip.outSec }));
+          .filter((clip) => clip.assetId === mediaId)
+          .map((clip) => ({ startSec: clip.trimInSec, endSec: clip.trimOutSec }));
         const existing = readMediaFaceTrack(workingProject, mediaId);
         const missing = subtractRanges(required, existing.segments);
         if (!missing.length) continue;
@@ -408,28 +415,15 @@ export default function EditorPage() {
         }
       }
 
-      const segments = videoClips.map((clip) => {
-        const track = readMediaFaceTrack(workingProject, clip.mediaId);
-        return {
-          mediaId: clip.mediaId,
-          trimStartSec: clip.inSec,
-          trimEndSec: clip.outSec,
-          sequenceStartSec: clip.startSec,
-          // Scoped to just this clip's own media and edit-time window, so a
-          // different media's segment can never inherit these points.
-          facePoints: mapFaceTrackToEditTime(track.points, [clip], clip.mediaId),
-          faceCoverage: mapFaceRangesToEditTime(track.segments, [clip], clip.mediaId),
-        };
-      });
-
+      // The server derives the full render plan straight from the (now
+      // up-to-date) stored project via buildRenderPlan -- no need to hand-
+      // assemble segments/cues here, so preview and export can never disagree
+      // about what a given project actually contains.
       const result = await renderProject(project.id, {
         style: captionStyle,
         width: 1080,
         height: 1920,
         fps: 30,
-        durationSec: totalDuration,
-        segments,
-        cues: buildRenderCues(editCaptionCues),
       });
       setRenderDownload(renderDownloadUrl(result.downloadUrl));
       flash("Render complete · 1080 × 1920 MP4");
@@ -441,7 +435,7 @@ export default function EditorPage() {
   }
 
   function selectMedia(mediaId: string) {
-    const clip = project?.clips.find((candidate) => candidate.mediaId === mediaId);
+    const clip = project?.clips.find((candidate) => isVideoItem(candidate) && candidate.assetId === mediaId);
     if (!clip) return;
     const track = project?.tracks.find((candidate) => candidate.id === clip.trackId);
     setSelectedLayer(clip.trackId);
@@ -462,13 +456,13 @@ export default function EditorPage() {
     if (clip.id !== activeClipId) {
       setActiveClipId(clip.id);
     } else if (videoRef.current) {
-      videoRef.current.currentTime = clip.inSec + Math.max(0, clamped - clip.startSec);
+      videoRef.current.currentTime = clip.trimInSec + Math.max(0, clamped - clip.startSec);
     }
   }
 
   function onVideoTimeUpdate(localTime: number) {
     if (!activeClip) return;
-    if (localTime >= activeClip.outSec - 0.02) {
+    if (localTime >= activeClip.trimOutSec - 0.02) {
       const index = videoClips.findIndex((clip) => clip.id === activeClip.id);
       const next = videoClips[index + 1];
       if (next) {
@@ -480,7 +474,7 @@ export default function EditorPage() {
       }
       return;
     }
-    setCurrentTime(activeClip.startSec + (localTime - activeClip.inSec));
+    setCurrentTime(activeClip.startSec + (localTime - activeClip.trimInSec));
   }
 
   return (

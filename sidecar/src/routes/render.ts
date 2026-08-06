@@ -2,49 +2,13 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { Router } from "express";
 import { nanoid } from "nanoid";
-import { getMediaFileForProject, getProject, getRenderFile, registerRender, storageDir } from "../db.js";
+import { getRenderFile, getProject, registerRender, storageDir } from "../db.js";
 import { renderCaptionedVideo } from "../render.js";
-import type { CaptionStyleId, RenderCue, RenderFacePoint, RenderFaceRange, RenderSegment } from "../../../shared/render-contract.js";
+import { buildRenderPlan } from "../../../shared/render-plan.js";
+import type { CaptionStyleId } from "../../../shared/render-contract.js";
 
 const rendersDir = path.join(storageDir, "renders");
 mkdirSync(rendersDir, { recursive: true });
-
-interface RenderRequestSegment {
-  mediaId: string;
-  trimStartSec: number;
-  trimEndSec: number;
-  sequenceStartSec: number;
-  facePoints?: RenderFacePoint[];
-  faceCoverage?: RenderFaceRange[];
-}
-
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function sanitizeFacePoints(value: unknown): RenderFacePoint[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter(
-    (point): point is RenderFacePoint =>
-      !!point &&
-      typeof point === "object" &&
-      isFiniteNumber((point as RenderFacePoint).editTimeSec) &&
-      isFiniteNumber((point as RenderFacePoint).centerX) &&
-      isFiniteNumber((point as RenderFacePoint).centerY)
-  );
-}
-
-function sanitizeFaceCoverage(value: unknown): RenderFaceRange[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter(
-    (range): range is RenderFaceRange =>
-      !!range &&
-      typeof range === "object" &&
-      isFiniteNumber((range as RenderFaceRange).startSec) &&
-      isFiniteNumber((range as RenderFaceRange).endSec) &&
-      (range as RenderFaceRange).endSec > (range as RenderFaceRange).startSec
-  );
-}
 
 export const projectRenderRouter = Router();
 
@@ -60,63 +24,38 @@ projectRenderRouter.post("/:id/render", async (req, res) => {
     width?: number;
     height?: number;
     fps?: number;
-    durationSec?: number;
-    segments?: RenderRequestSegment[];
-    cues?: RenderCue[];
   };
 
-  const requestSegments = body.segments ?? [];
-  if (!requestSegments.length) {
-    res.status(400).json({ error: "At least one segment is required" });
-    return;
-  }
-
   const port = Number(process.env.PORT ?? 4310);
-  const segments: RenderSegment[] = [];
-  for (const segment of requestSegments) {
-    // Membership in this project's own media list is the ownership check -- a
-    // render request can never pull in another project's media by mediaId.
-    const media = project.media.find((item) => item.id === segment.mediaId);
-    if (!media) {
-      res.status(400).json({ error: `mediaId ${segment.mediaId} does not belong to this project` });
-      return;
-    }
-    const file = getMediaFileForProject(project.id, segment.mediaId);
-    if (!file) {
-      res.status(400).json({ error: `Media file not found for mediaId ${segment.mediaId}` });
-      return;
-    }
-    segments.push({
-      // Remotion's asset downloader only accepts http(s) URLs, not file://, so we
-      // point it at the sidecar's own media-streaming route rather than a raw path.
-      src: `http://localhost:${port}/media/${segment.mediaId}/file`,
-      trimStartSec: segment.trimStartSec,
-      trimEndSec: segment.trimEndSec,
-      sequenceStartSec: segment.sequenceStartSec,
-      sourceWidth: media.width,
-      sourceHeight: media.height,
-      // Scoped to this segment's own media only -- never a route-wide shared
-      // list, so one media's tracked position can never render under another
-      // media's segment.
-      facePoints: sanitizeFacePoints(segment.facePoints),
-      faceCoverage: sanitizeFaceCoverage(segment.faceCoverage),
-    });
+  // Remotion's asset downloader only accepts http(s) URLs, not file://, so
+  // resolve every asset id to the sidecar's own media-streaming route. This
+  // resolver is the one piece of this that's environment-specific -- a future
+  // remote renderer supplies a different one, buildRenderPlan itself doesn't
+  // need to change.
+  const resolveAssetUrl = (assetId: string) => `http://localhost:${port}/media/${assetId}/file`;
+
+  // The plan is derived straight from the project already sitting in the
+  // database -- the client no longer hand-assembles segments/cues/face
+  // points itself, so there is exactly one place a given project's render
+  // output can come from, and preview (once wired to the same plan) can never
+  // disagree with export about what a project actually contains.
+  const plan = buildRenderPlan(project, resolveAssetUrl, {
+    captionStyle: body.style,
+    width: body.width,
+    height: body.height,
+    fps: body.fps,
+  });
+
+  if (!plan.layers.length) {
+    res.status(400).json({ error: "Project has no timeline items to render" });
+    return;
   }
 
   const renderId = nanoid();
   const outputPath = path.join(rendersDir, `${renderId}.mp4`);
 
   try {
-    await renderCaptionedVideo({
-      segments,
-      cues: body.cues ?? [],
-      style: body.style ?? "pop",
-      durationSec: body.durationSec ?? 1,
-      width: body.width ?? 1080,
-      height: body.height ?? 1920,
-      fps: body.fps ?? 30,
-      outputPath,
-    });
+    await renderCaptionedVideo({ plan, outputPath });
     registerRender(renderId, project.id, outputPath);
     res.status(201).json({ renderId, downloadUrl: `/renders/${renderId}/file` });
   } catch (error) {

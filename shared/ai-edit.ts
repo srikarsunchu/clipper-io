@@ -1,4 +1,4 @@
-import type { Clip } from "./timeline";
+import type { TimelineItem } from "./timeline";
 
 export const AI_CLIP_TYPES = [
   "best",
@@ -60,5 +60,5 @@ export interface FindMomentsResponse {
 
 export interface AiEditState {
   generations?: AiGeneration[];
-  sourceTimelineSnapshot?: Clip[] | null;
+  sourceTimelineSnapshot?: TimelineItem[] | null;
 }
