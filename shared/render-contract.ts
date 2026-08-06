@@ -49,6 +49,10 @@ export interface VideoLayer {
   sourceHeight: number;
   fit: LayerFit;
   opacity: number;
+  /** extra zoom on top of the cover-fit (and face-tracking pan, when
+   * present) scale -- the persisted counterpart of the editor's per-clip
+   * "Transform > Scale" control. 1 = no extra zoom. */
+  manualScale: number;
   /** already scoped to this layer's own media -- never a shared, timeline-wide
    * list, so one media's positions can never leak into another's layer */
   facePoints: RenderFacePoint[];

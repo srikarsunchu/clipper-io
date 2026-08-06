@@ -1,15 +1,13 @@
 "use client";
 
 import { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { PlayerRef } from "@remotion/player";
 import type { Project, TimelineItem, VideoItem } from "../shared/timeline";
 import type { CaptionStyleId } from "../shared/render-contract";
 import {
   buildCaptionCues,
   findClipAtTime as findClipAtTimelineTime,
-  interpolateFacePoint,
   isVideoItem,
-  mapFaceRangesToEditTime,
-  mapFaceTrackToEditTime,
   mapCuesToEditTime,
   normalizeProject,
   readMediaFaceTrack,
@@ -30,6 +28,11 @@ type Layout = "focus" | "split" | "gameplay";
 type CaptionStyle = CaptionStyleId;
 type Inspector = "clip" | "style" | "adjust";
 
+// Matches buildRenderPlan's/startRender's own default -- nothing in this
+// project varies frame rate yet, so the preview and the export agree on it
+// without needing to be threaded through as a prop.
+const PREVIEW_FPS = 30;
+
 export default function EditorPage() {
   const [tool, setTool] = useState<Tool>("media");
   const [layout, setLayout] = useState<Layout>("split");
@@ -49,12 +52,21 @@ export default function EditorPage() {
   const [toast, setToast] = useState("");
   const [captionsOn, setCaptionsOn] = useState(true);
   const [blur, setBlur] = useState(18);
-  const [scale, setScale] = useState(112);
   const [activeCaption, setActiveCaption] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
   const [findingMoments, setFindingMoments] = useState(false);
   const [moments, setMoments] = useState<MomentCandidate[]>([]);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const playerRef = useRef<PlayerRef>(null);
+  // Player mounts/unmounts as `hasMedia` flips (e.g. once the project finishes
+  // loading), which a plain useRef never signals -- a `useEffect(..., [])`
+  // attaching listeners to playerRef.current would silently no-op forever if
+  // it ran before the Player existed. This callback ref makes attachment
+  // itself reactive.
+  const [playerReady, setPlayerReady] = useState(false);
+  const setPlayerRef = (instance: PlayerRef | null) => {
+    playerRef.current = instance;
+    setPlayerReady(instance !== null);
+  };
 
   const videoTrack = project?.tracks.find((track) => track.kind === "video") ?? null;
   const videoClips: VideoItem[] = useMemo(
@@ -69,7 +81,10 @@ export default function EditorPage() {
     ? videoClips[videoClips.length - 1].startSec + videoClips[videoClips.length - 1].durationSec
     : 0;
   const projectDuration = getTimelineDuration(project?.clips ?? []);
-  const activeClip = videoClips.find((clip) => clip.id === activeClipId) ?? videoClips[0] ?? null;
+  // Whichever clip the playhead currently sits inside drives the Inspector's
+  // per-clip controls (e.g. Scale); falls back to the explicitly-selected/last
+  // clip when the playhead is outside every clip (e.g. past the timeline end).
+  const activeClip = findClipAtTime(currentTime) ?? videoClips.find((clip) => clip.id === activeClipId) ?? videoClips[0] ?? null;
   const activeMedia = activeClip ? mediaById.get(activeClip.assetId) ?? null : null;
 
   const hasTranscriptForActiveMedia = Boolean(
@@ -85,22 +100,10 @@ export default function EditorPage() {
     () => mapCuesToEditTime(captionCues, videoClips, hasTranscriptForActiveMedia ? project?.transcriptMediaId ?? null : null),
     [captionCues, videoClips, hasTranscriptForActiveMedia, project?.transcriptMediaId]
   );
-  const sourceTime = activeClip ? activeClip.trimInSec + (currentTime - activeClip.startSec) : 0;
-  const activeCue = captionCues.find((cue) => sourceTime >= cue.start && sourceTime < cue.end) ?? null;
-
-  const activeMediaFaceTrack = useMemo(
-    () => (project && activeMedia ? readMediaFaceTrack(project, activeMedia.id) : { points: [], segments: [] }),
-    [project, activeMedia]
-  );
-  const editFaceTrack = useMemo(
-    () => (activeMedia ? mapFaceTrackToEditTime(activeMediaFaceTrack.points, videoClips, activeMedia.id) : []),
-    [activeMediaFaceTrack, videoClips, activeMedia]
-  );
-  const editFaceCoverage = useMemo(
-    () => (activeMedia ? mapFaceRangesToEditTime(activeMediaFaceTrack.segments, videoClips, activeMedia.id) : []),
-    [activeMediaFaceTrack, videoClips, activeMedia]
-  );
-  const autoFramePoint = interpolateFacePoint(editFaceTrack, editFaceCoverage, currentTime);
+  // Per-clip content zoom -- persisted on the active clip's transform (so it
+  // round-trips through buildRenderPlan into export) rather than local-only
+  // state. Displayed as a percentage; stored as a plain multiplier (1 = 100%).
+  const scale = Math.round((activeClip?.transform?.scale ?? 1) * 100);
 
   useEffect(() => {
     if (!activeMedia) {
@@ -175,21 +178,38 @@ export default function EditorPage() {
   });
 
   useEffect(() => {
-    if (!videoRef.current || !activeClip) return;
-    videoRef.current.muted = muted;
-    if (playing) videoRef.current.play().catch(() => setPlaying(false));
-    else videoRef.current.pause();
-  }, [playing, muted, activeClip]);
+    const player = playerRef.current;
+    if (!player) return;
+    if (muted) player.mute();
+    else player.unmute();
+  }, [muted, playerReady]);
 
   useEffect(() => {
-    // Only re-seek when the active clip identity changes (scrub target or clip
-    // boundary crossing). Depending on currentTime/activeClip here would fire on
-    // every native timeupdate tick and fight playback.
-    if (!videoRef.current || !activeClip) return;
-    const desiredLocal = activeClip.trimInSec + Math.max(0, currentTime - activeClip.startSec);
-    videoRef.current.currentTime = desiredLocal;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeClipId]);
+    const player = playerRef.current;
+    if (!player) return;
+    if (playing && !player.isPlaying()) player.play();
+    else if (!playing && player.isPlaying()) player.pause();
+  }, [playing, playerReady]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player) return;
+    // The composition's own Sequences already handle multi-clip playback
+    // continuously -- this just mirrors the Player's frame back into the
+    // project-wide edit-time state everything else (Inspector, Timeline,
+    // AssetPanel) already reads.
+    const onFrameUpdate = ({ detail }: { detail: { frame: number } }) => {
+      setCurrentTime(detail.frame / PREVIEW_FPS);
+    };
+    const onEnded = () => setPlaying(false);
+    player.addEventListener("frameupdate", onFrameUpdate);
+    player.addEventListener("ended", onEnded);
+    return () => {
+      player.removeEventListener("frameupdate", onFrameUpdate);
+      player.removeEventListener("ended", onEnded);
+    };
+  }, [playerReady]);
+
 
   function flash(message: string) {
     setToast(message);
@@ -450,31 +470,20 @@ export default function EditorPage() {
 
   function syncVideoTime(value: number) {
     const clamped = Math.max(0, Math.min(totalDuration, value));
-    const clip = findClipAtTime(clamped) ?? videoClips[0] ?? null;
     setCurrentTime(clamped);
-    if (!clip) return;
-    if (clip.id !== activeClipId) {
-      setActiveClipId(clip.id);
-    } else if (videoRef.current) {
-      videoRef.current.currentTime = clip.trimInSec + Math.max(0, clamped - clip.startSec);
-    }
+    playerRef.current?.seekTo(Math.round(clamped * PREVIEW_FPS));
+    const clip = findClipAtTime(clamped) ?? videoClips[0] ?? null;
+    if (clip && clip.id !== activeClipId) setActiveClipId(clip.id);
   }
 
-  function onVideoTimeUpdate(localTime: number) {
-    if (!activeClip) return;
-    if (localTime >= activeClip.trimOutSec - 0.02) {
-      const index = videoClips.findIndex((clip) => clip.id === activeClip.id);
-      const next = videoClips[index + 1];
-      if (next) {
-        setCurrentTime(next.startSec);
-        setActiveClipId(next.id);
-      } else {
-        setPlaying(false);
-        setCurrentTime(totalDuration);
-      }
-      return;
-    }
-    setCurrentTime(activeClip.startSec + (localTime - activeClip.trimInSec));
+  function setClipScale(percent: number) {
+    if (!project || !activeClip) return;
+    const nextClips = project.clips.map((clip) =>
+      clip.id === activeClip.id
+        ? { ...clip, transform: { x: clip.transform?.x ?? 0, y: clip.transform?.y ?? 0, scale: percent / 100 } }
+        : clip
+    );
+    persistClips(nextClips);
   }
 
   return (
@@ -520,27 +529,21 @@ export default function EditorPage() {
         </aside>
 
         <PreviewStage
-          activeClip={activeClip}
-          activeMedia={activeMedia}
-          videoRef={videoRef}
+          ref={setPlayerRef}
+          project={project}
+          hasMedia={Boolean(activeClip && activeMedia)}
           layout={layout}
           zoom={zoom}
-          mediaScale={scale}
-          autoFramePoint={autoFramePoint}
           currentTime={currentTime}
           totalDuration={projectDuration}
           playing={playing}
           muted={muted}
           captionsOn={captionsOn}
-          activeCue={activeCue}
-          sourceTime={sourceTime}
           captionStyle={captionStyle}
           onZoomChange={setZoom}
           onTogglePlayback={togglePlayback}
           onSeek={syncVideoTime}
           onToggleMute={() => setMuted(!muted)}
-          onVideoTimeUpdate={onVideoTimeUpdate}
-          onVideoEnded={() => setPlaying(false)}
         />
 
         <InspectorPanel
@@ -549,7 +552,7 @@ export default function EditorPage() {
           layout={layout}
           setLayout={setLayout}
           scale={scale}
-          setScale={setScale}
+          setScale={setClipScale}
           blur={blur}
           setBlur={setBlur}
           captionStyle={captionStyle}

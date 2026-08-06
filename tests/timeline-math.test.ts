@@ -415,6 +415,20 @@ test("buildRenderPlan resolves asset URLs through the injected resolver, not a h
   assert.equal((layer as { src: string }).src, "s3://bucket/m1.mp4");
 });
 
+test("buildRenderPlan resolves a video layer's manualScale from the item's transform, defaulting to 1", () => {
+  const project = baseProject({
+    clips: [
+      videoItem({ id: "a", trackId: "video", assetId: "m1", trimInSec: 0, trimOutSec: 5, startSec: 0 }),
+      { ...videoItem({ id: "b", trackId: "video", assetId: "m1", trimInSec: 5, trimOutSec: 10, startSec: 5 }), transform: { scale: 1.3, x: 0, y: 0 } },
+    ],
+    media: [{ id: "m1", fileName: "a.mp4", mimeType: "video/mp4", durationSec: 10, width: 1920, height: 1080, fps: 30, hasAudio: true, createdAt: "now" }],
+  });
+  const plan = buildRenderPlan(project, (id) => `https://cdn.example/${id}`);
+  const videoLayers = plan.layers.filter((layer) => layer.kind === "video");
+  assert.equal(videoLayers[0].manualScale, 1);
+  assert.equal(videoLayers[1].manualScale, 1.3);
+});
+
 test("buildRenderPlan builds image/text/audio layers with sensible defaults", () => {
   const project = baseProject({
     tracks: [

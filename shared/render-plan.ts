@@ -94,6 +94,7 @@ function buildLayerForItem(item: TimelineItem, project: Project, resolveAssetUrl
         sourceHeight: media?.height ?? FALLBACK_HEIGHT,
         fit: item.fit ?? "cover",
         opacity: item.opacity ?? 1,
+        manualScale: item.transform?.scale ?? 1,
         facePoints,
         faceCoverage,
       };

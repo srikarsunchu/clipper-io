@@ -1,85 +1,66 @@
 "use client";
-/* eslint-disable @next/next/no-img-element -- media is streamed by the local sidecar */
 
-import type { RefObject } from "react";
+import { forwardRef, useMemo } from "react";
+import { Player, type PlayerRef } from "@remotion/player";
 import type { CaptionStyleId } from "../../shared/render-contract";
-import type { MediaAsset, VideoItem } from "../../shared/timeline";
-import type { CaptionCue } from "../../shared/timeline-math";
+import type { Project } from "../../shared/timeline";
+import { buildRenderPlan } from "../../shared/render-plan";
+import { RenderPlanComposition } from "../../shared/RenderPlanComposition";
 import { mediaFileUrl } from "../sidecar-client";
 
 type Layout = "focus" | "split" | "gameplay";
 
-// Must match .video-canvas's fixed width/height in globals.css -- the cover-fit
-// and pan-to-face math below is computed against this exact pixel box.
-const CANVAS_WIDTH = 270;
-const CANVAS_HEIGHT = 480;
-
-function computeAutoFrameStyle(point: { centerX: number; centerY: number }, sourceWidth: number, sourceHeight: number) {
-  const scale = Math.max(CANVAS_WIDTH / sourceWidth, CANVAS_HEIGHT / sourceHeight);
-  const scaledWidth = sourceWidth * scale;
-  const scaledHeight = sourceHeight * scale;
-
-  const desiredLeft = point.centerX * scaledWidth - CANVAS_WIDTH / 2;
-  const cropLeft = Math.max(0, Math.min(scaledWidth - CANVAS_WIDTH, desiredLeft));
-  const desiredTop = point.centerY * scaledHeight - CANVAS_HEIGHT / 2;
-  const cropTop = Math.max(0, Math.min(scaledHeight - CANVAS_HEIGHT, desiredTop));
-
-  return {
-    position: "absolute" as const,
-    width: `${scaledWidth}px`,
-    height: `${scaledHeight}px`,
-    left: `${-cropLeft}px`,
-    top: `${-cropTop}px`,
-  };
-}
-
-export function PreviewStage({
-  activeClip,
-  activeMedia,
-  videoRef,
-  layout,
-  zoom,
-  mediaScale,
-  autoFramePoint,
-  currentTime,
-  totalDuration,
-  playing,
-  muted,
-  captionsOn,
-  activeCue,
-  sourceTime,
-  captionStyle,
-  onZoomChange,
-  onTogglePlayback,
-  onSeek,
-  onToggleMute,
-  onVideoTimeUpdate,
-  onVideoEnded,
-}: {
-  activeClip: VideoItem | null;
-  activeMedia: MediaAsset | null;
-  videoRef: RefObject<HTMLVideoElement | null>;
+/** Live editor preview -- renders through the exact same `buildRenderPlan` +
+ * `RenderPlanComposition` the server-side export uses (via `@remotion/player`),
+ * so a given project state can never look different in the preview than it
+ * renders in the final MP4. Playback is controlled imperatively through the
+ * forwarded `PlayerRef` (play/pause/seekTo) rather than a raw `<video>`
+ * element, since the composition already handles multi-clip sequencing,
+ * face-tracking pan, and captions internally. */
+export const PreviewStage = forwardRef<PlayerRef, {
+  project: Project | null;
+  hasMedia: boolean;
   layout: Layout;
   zoom: number;
-  mediaScale: number;
-  autoFramePoint: { centerX: number; centerY: number } | null;
+  captionsOn: boolean;
+  captionStyle: CaptionStyleId;
   currentTime: number;
   totalDuration: number;
   playing: boolean;
   muted: boolean;
-  captionsOn: boolean;
-  activeCue: CaptionCue | null;
-  sourceTime: number;
-  captionStyle: CaptionStyleId;
   onZoomChange: (zoom: number) => void;
   onTogglePlayback: () => void;
   onSeek: (time: number) => void;
   onToggleMute: () => void;
-  onVideoTimeUpdate: (time: number) => void;
-  onVideoEnded: () => void;
-}) {
-  const isVideo = activeMedia?.mimeType.startsWith("video/");
-  const isImage = activeMedia?.mimeType.startsWith("image/");
+}>(function PreviewStage(
+  {
+    project,
+    hasMedia,
+    layout,
+    zoom,
+    captionsOn,
+    captionStyle,
+    currentTime,
+    totalDuration,
+    playing,
+    muted,
+    onZoomChange,
+    onTogglePlayback,
+    onSeek,
+    onToggleMute,
+  },
+  playerRef,
+) {
+  const plan = useMemo(() => {
+    if (!project) return null;
+    const full = buildRenderPlan(project, mediaFileUrl, { captionStyle });
+    // Captions on/off is a preview-only toggle -- export always burns them in
+    // when a transcript exists, so this filters the *preview's* plan only,
+    // never buildRenderPlan's own output.
+    if (captionsOn) return full;
+    return { ...full, layers: full.layers.filter((layer) => layer.kind !== "captions") };
+  }, [project, captionStyle, captionsOn]);
+  const durationInFrames = plan ? Math.max(1, Math.round(plan.durationSec * plan.fps)) : 1;
 
   return (
     <section className="stage-zone">
@@ -94,41 +75,28 @@ export function PreviewStage({
       </div>
       <div className="canvas-space">
         <div className={`video-canvas layout-${layout}`} style={{ transform: `scale(${zoom / 100})` }}>
-          {activeClip && activeMedia && isVideo && (
-            <video
-              key={activeMedia.id}
-              ref={videoRef}
-              src={mediaFileUrl(activeMedia.id)}
-              className="local-video"
-              style={
-                autoFramePoint
-                  ? computeAutoFrameStyle(autoFramePoint, activeMedia.width, activeMedia.height)
-                  : { transform: `scale(${mediaScale / 100})` }
-              }
-              onTimeUpdate={(event) => onVideoTimeUpdate((event.target as HTMLVideoElement).currentTime)}
-              onEnded={onVideoEnded}
+          {hasMedia && plan ? (
+            <Player
+              ref={playerRef}
+              component={RenderPlanComposition}
+              inputProps={{ plan }}
+              durationInFrames={durationInFrames}
+              compositionWidth={plan.width}
+              compositionHeight={plan.height}
+              fps={plan.fps}
+              style={{ width: "100%", height: "100%" }}
+              initialFrame={Math.round(currentTime * plan.fps)}
+              clickToPlay={false}
+              doubleClickToFullscreen={false}
             />
-          )}
-          {activeClip && activeMedia && isImage && (
-            <img className="local-video" style={{ transform: `scale(${mediaScale / 100})` }} src={mediaFileUrl(activeMedia.id)} alt="" />
-          )}
-          {(!activeClip || !activeMedia) && (
+          ) : (
             <div className="empty-canvas">
               <span>▧</span>
               <strong>Add media to start</strong>
               <small>Your 9:16 composition will appear here</small>
             </div>
           )}
-          {captionsOn && activeCue && (
-            <div className={`canvas-caption caption-${captionStyle}`}>
-              {activeCue.words.map((word, index) =>
-                sourceTime >= word.start && sourceTime < word.end
-                  ? <em key={index}>{word.word} </em>
-                  : <span key={index}>{word.word} </span>
-              )}
-            </div>
-          )}
-          {activeClip && activeMedia && <div className="selection-box"><i className="handle tl" /><i className="handle tr" /><i className="handle bl" /><i className="handle br" /></div>}
+          {hasMedia && <div className="selection-box"><i className="handle tl" /><i className="handle tr" /><i className="handle bl" /><i className="handle br" /></div>}
         </div>
       </div>
       <div className="transport">
@@ -147,7 +115,7 @@ export function PreviewStage({
       </div>
     </section>
   );
-}
+});
 
 function formatTimecode(seconds: number): string {
   const safe = Math.max(0, seconds);

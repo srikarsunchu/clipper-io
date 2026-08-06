@@ -226,8 +226,10 @@ function VideoLayerView({ layer, compositionWidth, compositionHeight, fps }: {
 
   // Cover-fit math: scale the source up so it fully covers the output frame, then
   // pan so the tracked face center lands at the output's center, clamped so the
-  // video never shows a gap at its edges.
-  const scale = Math.max(compositionWidth / layer.sourceWidth, compositionHeight / layer.sourceHeight);
+  // video never shows a gap at its edges. manualScale layers an extra user-chosen
+  // zoom on top -- it applies whether or not face tracking is active, unlike the
+  // old preview-only implementation where auto-framing silently ignored it.
+  const scale = Math.max(compositionWidth / layer.sourceWidth, compositionHeight / layer.sourceHeight) * layer.manualScale;
   const scaledWidth = layer.sourceWidth * scale;
   const scaledHeight = layer.sourceHeight * scale;
 
