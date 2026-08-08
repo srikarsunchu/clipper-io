@@ -9,12 +9,16 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { MediaAsset, TimelineItem, Track } from "../../../shared/timeline";
+import type { AudioItem, MediaAsset, TimelineItem, Track, VideoItem } from "../../../shared/timeline";
 import {
   clampClipStart,
   clipDuration,
+  isAudioItem,
+  isImageItem,
+  isTextItem,
   isVideoItem,
   snapTime,
+  withAudioTrim,
   withVideoTrim,
   type EditCaptionCue,
 } from "../../../shared/timeline-math";
@@ -29,6 +33,11 @@ const LABEL_WIDTH = 176;
 const MIN_ITEM_PX = 10;
 
 type DragMode = "move" | "trim-start" | "trim-end";
+
+// How far a pointer has to travel above/below the timeline tracks before a
+// "move" drag counts as "drag this clip out to delete it" rather than an
+// ordinary reposition.
+const DRAG_OUT_THRESHOLD_PX = 48;
 
 interface DragState {
   clipId: string;
@@ -75,6 +84,7 @@ export function Timeline({
   const [pxPerSecond, setPxPerSecond] = useState(4);
   const [draftClips, setDraftClips] = useState(clips);
   const [drag, setDrag] = useState<DragState | null>(null);
+  const [dragOutPending, setDragOutPending] = useState(false);
   const [snapping, setSnapping] = useState(true);
   const [hiddenTracks, setHiddenTracks] = useState<Set<string>>(new Set());
   const [mutedTracks, setMutedTracks] = useState<Set<string>>(new Set());
@@ -214,6 +224,17 @@ export function Timeline({
 
   function updateDrag(event: ReactPointerEvent) {
     if (!drag) return;
+    if (drag.mode === "move") {
+      const viewport = viewportRef.current;
+      const rect = viewport?.getBoundingClientRect();
+      const outOfBounds = Boolean(
+        rect && (event.clientY < rect.top - DRAG_OUT_THRESHOLD_PX || event.clientY > rect.bottom + DRAG_OUT_THRESHOLD_PX)
+      );
+      if (outOfBounds !== dragOutPending) setDragOutPending(outOfBounds);
+      // Dragged far enough out that release will delete it -- don't also fight
+      // that with the normal reposition math below.
+      if (outOfBounds) return;
+    }
     const delta = (event.clientX - drag.pointerX) / pxPerSecond;
     const threshold = 8 / pxPerSecond;
     const candidates = snapCandidates(drag.clipId);
@@ -226,34 +247,37 @@ export function Timeline({
           const proposed = snapping ? snapTime(rawStart, candidates, threshold) : rawStart;
           return { ...clip, startSec: clampClipStart(clip, proposed, trackClips) };
         }
-        // Trimming only has meaning for items with a source trim window --
-        // image/text items don't have one yet (that UI lands in Phase 1), so
-        // leave them untouched rather than reading fields they don't have.
-        if (!isVideoItem(clip) || !isVideoItem(drag.original)) return clip;
-        if (drag.mode === "trim-start") {
-          const maxDelta = clipDuration(drag.original) - 0.1;
-          let trimDelta = Math.max(-drag.original.trimInSec, Math.min(maxDelta, delta));
-          const rawStart = drag.original.startSec + trimDelta;
-          const snappedStart = snapping ? snapTime(rawStart, candidates, threshold) : rawStart;
-          trimDelta = snappedStart - drag.original.startSec;
-          const adjustedStart = clampClipStart(clip, Math.max(0, snappedStart), trackClips);
-          return {
-            ...withVideoTrim(clip, Math.max(0, drag.original.trimInSec + adjustedStart - drag.original.startSec), clip.trimOutSec),
-            startSec: adjustedStart,
-          };
+        // Image/text items have no source trim window -- dragging their edges
+        // just adjusts durationSec (and, for the start handle, startSec) directly.
+        if ((isImageItem(clip) && isImageItem(drag.original)) || (isTextItem(clip) && isTextItem(drag.original))) {
+          const originalEnd = drag.original.startSec + drag.original.durationSec;
+          if (drag.mode === "trim-start") {
+            const maxDelta = drag.original.durationSec - 0.1;
+            const rawStart = Math.max(0, Math.min(drag.original.startSec + maxDelta, drag.original.startSec + delta));
+            const snappedStart = snapping ? snapTime(rawStart, candidates, threshold) : rawStart;
+            const adjustedStart = clampClipStart(clip, Math.max(0, Math.min(originalEnd - 0.1, snappedStart)), trackClips);
+            return { ...clip, startSec: adjustedStart, durationSec: Math.max(0.1, originalEnd - adjustedStart) };
+          }
+          const rawEnd = Math.max(drag.original.startSec + 0.1, originalEnd + delta);
+          const snappedEnd = snapping ? snapTime(rawEnd, candidates, threshold) : rawEnd;
+          return { ...clip, durationSec: Math.max(0.1, snappedEnd - drag.original.startSec) };
         }
-        const mediaDuration = mediaById.get(clip.assetId)?.durationSec ?? Number.POSITIVE_INFINITY;
-        const rawOut = Math.max(drag.original.trimInSec + 0.1, Math.min(mediaDuration, drag.original.trimOutSec + delta));
-        const timelineEnd = drag.original.startSec + (rawOut - drag.original.trimInSec);
-        const snappedEnd = snapping ? snapTime(timelineEnd, candidates, threshold) : timelineEnd;
-        return withVideoTrim(
-          clip,
-          clip.trimInSec,
-          Math.max(
-            drag.original.trimInSec + 0.1,
-            Math.min(mediaDuration, drag.original.trimInSec + snappedEnd - drag.original.startSec),
-          ),
-        );
+        // Video/audio items trim a window within their source media, bounded
+        // by how much source material actually exists on either side. Both
+        // kinds share the exact same arithmetic over plain numbers; only the
+        // final wrapper (withVideoTrim vs withAudioTrim) differs by kind, so
+        // branch on kind only at the point of constructing the return value.
+        if (isVideoItem(clip) && isVideoItem(drag.original)) {
+          const mediaDuration = mediaById.get(clip.assetId)?.durationSec ?? Number.POSITIVE_INFINITY;
+          const { trimInSec, trimOutSec, startSec } = trimSourceWindow(drag.mode, drag.original, delta, mediaDuration, trackClips, snapping, candidates, threshold, clip);
+          return { ...withVideoTrim(clip, trimInSec, trimOutSec), startSec };
+        }
+        if (isAudioItem(clip) && isAudioItem(drag.original)) {
+          const mediaDuration = mediaById.get(clip.assetId)?.durationSec ?? Number.POSITIVE_INFINITY;
+          const { trimInSec, trimOutSec, startSec } = trimSourceWindow(drag.mode, drag.original, delta, mediaDuration, trackClips, snapping, candidates, threshold, clip);
+          return { ...withAudioTrim(clip, trimInSec, trimOutSec), startSec };
+        }
+        return clip;
       });
       draftClipsRef.current = next;
       return next;
@@ -263,10 +287,18 @@ export function Timeline({
   async function finishDrag(event: ReactPointerEvent) {
     if (!drag) return;
     event.currentTarget.releasePointerCapture(event.pointerId);
+    const shouldDelete = dragOutPending;
+    const draggedClipId = drag.clipId;
     setDrag(null);
+    setDragOutPending(false);
     setSaveState("saving");
     try {
-      await onUpdateClips(draftClipsRef.current);
+      const nextClips = shouldDelete ? removeClipWithRipple(draftClipsRef.current, draggedClipId) : draftClipsRef.current;
+      if (shouldDelete) {
+        draftClipsRef.current = nextClips;
+        setDraftClips(nextClips);
+      }
+      await onUpdateClips(nextClips);
     } finally {
       setSaveState("saved");
     }
@@ -458,9 +490,10 @@ export function Timeline({
                           <TimelineClip
                             key={clip.id}
                             clip={clip}
-                            media={isVideoItem(clip) ? mediaById.get(clip.assetId) : undefined}
+                            media={isVideoItem(clip) || isImageItem(clip) || isAudioItem(clip) ? mediaById.get(clip.assetId) : undefined}
                             pxPerSecond={pxPerSecond}
                             selected={clip.id === activeClipId}
+                            pendingDelete={dragOutPending && drag?.clipId === clip.id}
                             onPointerDown={(event) => beginDrag(event, clip, "move")}
                             onPointerMove={updateDrag}
                             onPointerUp={finishDrag}
@@ -494,11 +527,65 @@ export function Timeline({
   );
 }
 
+/** Removes one item and closes the gap it leaves on its own track by shifting
+ * every later item on that same track left by the removed item's duration --
+ * mirrors deleteClipAtPlayhead's ripple in app/page.tsx (playhead-based
+ * deletion), just keyed by a specific clip id instead of the current time. */
+function removeClipWithRipple(clips: TimelineItem[], clipId: string): TimelineItem[] {
+  const removed = clips.find((clip) => clip.id === clipId);
+  if (!removed) return clips;
+  return clips
+    .filter((clip) => clip.id !== clipId)
+    .map((clip) =>
+      clip.trackId === removed.trackId && clip.startSec > removed.startSec
+        ? { ...clip, startSec: clip.startSec - removed.durationSec }
+        : clip
+    );
+}
+
+/** Shared arithmetic for trimming a source window (video/audio) -- both kinds
+ * have the identical trimInSec/trimOutSec/startSec shape, so the numbers are
+ * computed once here and the caller wraps them with the kind-specific
+ * withVideoTrim/withAudioTrim to get a properly-typed result back. */
+function trimSourceWindow(
+  mode: "trim-start" | "trim-end",
+  original: VideoItem | AudioItem,
+  delta: number,
+  mediaDuration: number,
+  trackClips: TimelineItem[],
+  snapping: boolean,
+  candidates: number[],
+  threshold: number,
+  clipForClamp: TimelineItem,
+): { trimInSec: number; trimOutSec: number; startSec: number } {
+  if (mode === "trim-start") {
+    const maxDelta = clipDuration(original) - 0.1;
+    const trimDelta = Math.max(-original.trimInSec, Math.min(maxDelta, delta));
+    const rawStart = original.startSec + trimDelta;
+    const snappedStart = snapping ? snapTime(rawStart, candidates, threshold) : rawStart;
+    const adjustedStart = clampClipStart(clipForClamp, Math.max(0, snappedStart), trackClips);
+    return {
+      trimInSec: Math.max(0, original.trimInSec + adjustedStart - original.startSec),
+      trimOutSec: original.trimOutSec,
+      startSec: adjustedStart,
+    };
+  }
+  const rawOut = Math.max(original.trimInSec + 0.1, Math.min(mediaDuration, original.trimOutSec + delta));
+  const timelineEnd = original.startSec + (rawOut - original.trimInSec);
+  const snappedEnd = snapping ? snapTime(timelineEnd, candidates, threshold) : timelineEnd;
+  return {
+    trimInSec: original.trimInSec,
+    trimOutSec: Math.max(original.trimInSec + 0.1, Math.min(mediaDuration, original.trimInSec + snappedEnd - original.startSec)),
+    startSec: original.startSec,
+  };
+}
+
 function TimelineClip({
   clip,
   media,
   pxPerSecond,
   selected,
+  pendingDelete,
   onPointerDown,
   onPointerMove,
   onPointerUp,
@@ -509,6 +596,7 @@ function TimelineClip({
   media?: MediaAsset;
   pxPerSecond: number;
   selected: boolean;
+  pendingDelete: boolean;
   onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onPointerMove: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onPointerUp: (event: ReactPointerEvent<HTMLButtonElement>) => void;
@@ -516,20 +604,22 @@ function TimelineClip({
   onTrimEnd: (event: ReactPointerEvent<HTMLSpanElement>) => void;
 }) {
   const length = clipDuration(clip);
+  const label = isTextItem(clip) ? clip.text || "Text card" : media?.fileName ?? "Media";
   return (
     <button
-      className={`timeline-media-item ${selected ? "selected" : ""}`}
+      className={`timeline-media-item kind-${clip.kind} ${selected ? "selected" : ""} ${pendingDelete ? "pending-delete" : ""}`}
       style={{ left: clip.startSec * pxPerSecond, width: Math.max(MIN_ITEM_PX, length * pxPerSecond) }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      title={`${media?.fileName ?? "Media"} · ${formatTimelineTime(length, true)}`}
+      title={pendingDelete ? "Release to remove from timeline" : `${label} · ${formatTimelineTime(length, true)}`}
     >
       <span className="timeline-trim-handle start" onPointerDown={onTrimStart} />
       {media?.mimeType.startsWith("video/") && <TimelineVideoFrame media={media} />}
       {media?.mimeType.startsWith("image/") && <img src={mediaFileUrl(media.id)} alt="" draggable={false} />}
+      {isAudioItem(clip) && <span className="timeline-audio-glyph" aria-hidden="true">♫</span>}
       <span className="timeline-item-tint" />
-      <strong>{media?.fileName ?? "Media"}</strong>
+      <strong>{label}</strong>
       <small>{formatTimelineTime(length, true)}</small>
       <span className="timeline-trim-handle end" onPointerDown={onTrimEnd} />
     </button>

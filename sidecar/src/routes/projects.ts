@@ -27,6 +27,7 @@ const DEFAULT_TRACKS: { kind: TrackKind; name: string }[] = [
   { kind: "caption", name: "Captions" },
   { kind: "broll", name: "B-roll" },
   { kind: "audio", name: "Audio" },
+  { kind: "elements", name: "Elements" },
 ];
 
 function createDefaultTracks(): Track[] {

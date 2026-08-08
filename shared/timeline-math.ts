@@ -1,10 +1,13 @@
 import type {
+  AudioItem,
   Clip,
   FaceTrackPoint,
   FaceTrackRange,
+  ImageItem,
   ItemTransform,
   MediaFaceTrack,
   Project,
+  TextItem,
   TimelineItem,
   TranscriptWord,
   VideoItem,
@@ -28,12 +31,39 @@ export function isVideoItem(item: TimelineItem): item is VideoItem {
   return item.kind === "video";
 }
 
-/** The only place a video/audio item's trim should be changed -- keeps
+export function isImageItem(item: TimelineItem): item is ImageItem {
+  return item.kind === "image";
+}
+
+export function isTextItem(item: TimelineItem): item is TextItem {
+  return item.kind === "text";
+}
+
+export function isAudioItem(item: TimelineItem): item is AudioItem {
+  return item.kind === "audio";
+}
+
+/** The only place a video item's trim should be changed -- keeps
  * `durationSec` (the single cross-kind source of truth for how long an item
  * occupies the timeline) in sync with the trim points automatically, rather
  * than relying on every caller to remember to update both. */
 export function withVideoTrim(item: VideoItem, trimInSec: number, trimOutSec: number): VideoItem {
   return { ...item, trimInSec, trimOutSec, durationSec: Math.max(0, trimOutSec - trimInSec) };
+}
+
+/** Same contract as `withVideoTrim`, for the other item kind with a source
+ * trim window. Kept as a separate function rather than a generic one over
+ * both kinds so each stays a plain, obviously-total function over its own
+ * concrete type -- no runtime kind-narrowing inside the helper itself. */
+export function withAudioTrim(item: AudioItem, trimInSec: number, trimOutSec: number): AudioItem {
+  return { ...item, trimInSec, trimOutSec, durationSec: Math.max(0, trimOutSec - trimInSec) };
+}
+
+/** Image/text items have no source trim window -- their duration is the
+ * whole of what they are, so "resizing" them on the timeline just sets
+ * `durationSec` directly rather than deriving it from trim points. */
+export function withItemDuration<T extends ImageItem | TextItem>(item: T, durationSec: number): T {
+  return { ...item, durationSec: Math.max(0.1, durationSec) };
 }
 
 /** Generic timeline-position duration -- valid for every item kind, since
@@ -377,6 +407,14 @@ export function normalizeProject(project: Project): Project {
     }
   }
 
+  const tracks = (project.tracks ?? []).map((track, order) => ({ ...track, order: track.order ?? order }));
+  // Phase 1 added an "elements" track (text cards, later shapes/stickers) --
+  // any project created before that migrates in one here rather than ever
+  // having text items with nowhere on the timeline to live.
+  if (!tracks.some((track) => track.kind === "elements")) {
+    tracks.push({ id: "elements", kind: "elements", name: "Elements", order: tracks.length });
+  }
+
   return {
     ...project,
     schemaVersion: 2,
@@ -384,7 +422,7 @@ export function normalizeProject(project: Project): Project {
       ...asset,
       provenance: asset.provenance ?? { sourceType: "upload" },
     })),
-    tracks: (project.tracks ?? []).map((track, order) => ({ ...track, order: track.order ?? order })),
+    tracks,
     clips: migrateTimelineItems(project.clips as unknown as (Clip | TimelineItem)[]),
     transcript: project.transcript ?? null,
     transcriptMediaId: project.transcriptMediaId ?? null,

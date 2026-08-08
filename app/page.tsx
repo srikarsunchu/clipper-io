@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { PlayerRef } from "@remotion/player";
 import type { Project, TimelineItem, VideoItem } from "../shared/timeline";
 import type { CaptionStyleId } from "../shared/render-contract";
@@ -86,6 +86,27 @@ export default function EditorPage() {
   // clip when the playhead is outside every clip (e.g. past the timeline end).
   const activeClip = findClipAtTime(currentTime) ?? videoClips.find((clip) => clip.id === activeClipId) ?? videoClips[0] ?? null;
   const activeMedia = activeClip ? mediaById.get(activeClip.assetId) ?? null : null;
+  // Same playhead-driven selection as activeClip, but over every item kind --
+  // clicking/dragging any clip in the timeline already moves the playhead to
+  // its start (and selects its track), so this naturally becomes "whatever
+  // the user just interacted with" without needing separate click-to-select
+  // plumbing. Prefer an item on the currently-selected track first: multiple
+  // items on different tracks routinely overlap the same playhead position
+  // (e.g. a text card placed at 0 while a video clip already occupies 0), and
+  // without this, whichever item happens to be first in `project.clips` would
+  // always win regardless of what the user actually just clicked.
+  // selectedLayer holds either a real track id (set by clicking/dragging a
+  // clip) or a bare track *kind* string like "video" (its initial default,
+  // and what clicking a track's label sets) -- resolve it the same
+  // either-matches way Timeline.tsx already does before filtering by id,
+  // or every clip's trackId (a real id) would silently fail to match a
+  // kind-string default and this would never actually prefer anything.
+  const selectedTrack = project?.tracks.find((track) => track.id === selectedLayer || track.kind === selectedLayer);
+  const itemsOnSelectedTrack = (project?.clips ?? []).filter((clip) => clip.trackId === selectedTrack?.id);
+  const activeItem: TimelineItem | null =
+    (findClipAtTimelineTime(itemsOnSelectedTrack, currentTime) as TimelineItem | null) ??
+    (findClipAtTimelineTime(project?.clips ?? [], currentTime) as TimelineItem | null) ??
+    activeClip;
 
   const hasTranscriptForActiveMedia = Boolean(
     project?.transcript?.length &&
@@ -166,7 +187,13 @@ export default function EditorPage() {
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
-      if (target.closest("input, textarea, select, button, [contenteditable='true']")) return;
+      // Selecting a timeline clip focuses its underlying <button> -- excluding
+      // every button from shortcuts (meant to stop Space/Delete firing while
+      // a *different* button, e.g. Export, holds focus) previously made Delete/
+      // Backspace/Space/Split silently do nothing right after clicking a clip,
+      // which is the single most common thing to want to do next.
+      const isTimelineClip = target.closest(".timeline-media-item");
+      if (!isTimelineClip && target.closest("input, textarea, select, button, [contenteditable='true']")) return;
       if (event.code === "Space") { event.preventDefault(); togglePlayback(); }
       if (event.key.toLowerCase() === "s") splitClip();
       if (event.key === "ArrowLeft") { event.preventDefault(); syncVideoTime(currentTime - (event.shiftKey ? 5 : 1 / 30)); }
@@ -486,8 +513,40 @@ export default function EditorPage() {
     persistClips(nextClips);
   }
 
+  // Generic per-kind Inspector edits (text content/typography, image fit and
+  // motion preset, audio volume/fades) all funnel through here -- the caller
+  // already knows which concrete kind it's editing, so it hands back a whole
+  // updated item rather than a loosely-typed partial patch.
+  function updateItem(nextItem: TimelineItem) {
+    if (!project) return;
+    const nextClips = project.clips.map((clip) => (clip.id === nextItem.id ? nextItem : clip));
+    persistClips(nextClips);
+  }
+
+  function addTextItem() {
+    if (!project) return;
+    const elementsTrack = project.tracks.find((track) => track.kind === "elements");
+    if (!elementsTrack) return;
+    const trackItems = project.clips.filter((clip) => clip.trackId === elementsTrack.id);
+    const trackEnd = trackItems.reduce((max, item) => Math.max(max, item.startSec + item.durationSec), 0);
+    const newItem: TimelineItem = {
+      id: window.crypto.randomUUID(),
+      trackId: elementsTrack.id,
+      kind: "text",
+      text: "Your text here",
+      startSec: trackEnd,
+      durationSec: 4,
+      typography: { fontSize: 0.08, color: "#ffffff", weight: 800 },
+      alignment: "center",
+    };
+    persistClips([...project.clips, newItem]);
+    setSelectedLayer(elementsTrack.id);
+    setCurrentTime(trackEnd);
+    flash("Text card added");
+  }
+
   return (
-    <main className="editor-shell" onKeyDown={(event: ReactKeyboardEvent) => event.stopPropagation()}>
+    <main className="editor-shell">
       <EditorTopbar
         projectName={project?.name ?? "Loading…"}
         duration={formatTime(totalDuration)}
@@ -525,6 +584,7 @@ export default function EditorPage() {
               activeMedia &&
               project?.aiGenerations?.some((generation) => generation.sourceMediaId === activeMedia.id)
             )}
+            onAddText={addTextItem}
           />
         </aside>
 
@@ -559,6 +619,8 @@ export default function EditorPage() {
           setCaptionStyle={setCaptionStyle}
           captionsOn={captionsOn}
           setCaptionsOn={setCaptionsOn}
+          activeItem={activeItem}
+          onUpdateItem={updateItem}
         />
 
         <Timeline

@@ -6,8 +6,8 @@ const tools: { id: EditorTool; icon: string; label: string; available: boolean }
   { id: "media", icon: "▧", label: "Media", available: true },
   { id: "captions", icon: "CC", label: "Captions", available: true },
   { id: "broll", icon: "◫", label: "B-roll", available: false },
-  { id: "audio", icon: "♫", label: "Audio", available: false },
-  { id: "elements", icon: "◇", label: "Elements", available: false },
+  { id: "audio", icon: "♫", label: "Audio", available: true },
+  { id: "elements", icon: "◇", label: "Elements", available: true },
   { id: "ai", icon: "✦", label: "AI edit", available: true },
 ];
 

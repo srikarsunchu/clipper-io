@@ -10,6 +10,9 @@ import {
   findClipAtTime,
   getAdaptiveTickInterval,
   interpolateFacePoint,
+  isAudioItem,
+  isImageItem,
+  isTextItem,
   isVideoItem,
   mapCuesToEditTime,
   mapFaceRangesToEditTime,
@@ -21,6 +24,8 @@ import {
   snapTime,
   subtractRanges,
   timelineDuration,
+  withAudioTrim,
+  withItemDuration,
   withVideoTrim,
 } from "../shared/timeline-math.ts";
 import { buildRenderPlan } from "../shared/render-plan.ts";
@@ -470,4 +475,48 @@ test("buildRenderPlan appends a captions layer last (paints on top) when a trans
   });
   const plan = buildRenderPlan(project, (id) => `https://cdn.example/${id}`);
   assert.equal(plan.layers[plan.layers.length - 1].kind, "captions");
+});
+
+test("normalizeProject migrates in a missing elements track (Phase 1) without disturbing existing tracks", () => {
+  const project = baseProject(); // baseProject's fixture tracks predate the elements track
+  const normalized = normalizeProject(project);
+  assert.equal(normalized.tracks.length, 3);
+  assert.equal(normalized.tracks[0].kind, "video");
+  assert.equal(normalized.tracks[1].kind, "caption");
+  assert.equal(normalized.tracks[2].kind, "elements");
+});
+
+test("normalizeProject does not duplicate an elements track that already exists", () => {
+  const project = baseProject({
+    tracks: [
+      { id: "video", kind: "video", name: "Video", order: 0 },
+      { id: "els", kind: "elements", name: "Elements", order: 1 },
+    ],
+  });
+  const normalized = normalizeProject(project);
+  assert.equal(normalized.tracks.filter((track) => track.kind === "elements").length, 1);
+  assert.equal(normalized.tracks.find((track) => track.kind === "elements")?.id, "els");
+});
+
+test("kind type guards only match their own item kind", () => {
+  const image = { id: "i", trackId: "t", kind: "image", assetId: "m", startSec: 0, durationSec: 5 } as const;
+  const text = { id: "x", trackId: "t", kind: "text", text: "hi", startSec: 0, durationSec: 5 } as const;
+  const audio = { id: "a", trackId: "t", kind: "audio", assetId: "m", trimInSec: 0, trimOutSec: 5, startSec: 0, durationSec: 5 } as const;
+  assert.ok(isImageItem(image) && !isTextItem(image) && !isAudioItem(image));
+  assert.ok(isTextItem(text) && !isImageItem(text) && !isAudioItem(text));
+  assert.ok(isAudioItem(audio) && !isImageItem(audio) && !isTextItem(audio));
+});
+
+test("withAudioTrim keeps durationSec in sync with the trim window, like withVideoTrim", () => {
+  const audio = { id: "a", trackId: "t", kind: "audio" as const, assetId: "m", trimInSec: 2, trimOutSec: 5, startSec: 0, durationSec: 3 };
+  const trimmed = withAudioTrim(audio, 2, 8);
+  assert.equal(trimmed.durationSec, 6);
+  assert.equal(trimmed.trimInSec, 2);
+  assert.equal(trimmed.trimOutSec, 8);
+});
+
+test("withItemDuration sets an image/text item's duration directly, floored at 0.1s", () => {
+  const image = { id: "i", trackId: "t", kind: "image" as const, assetId: "m", startSec: 0, durationSec: 5 };
+  assert.equal(withItemDuration(image, 8).durationSec, 8);
+  assert.equal(withItemDuration(image, -3).durationSec, 0.1);
 });

@@ -1,6 +1,6 @@
 import type { AiGeneration } from "./ai-edit";
 
-export type TrackKind = "video" | "caption" | "broll" | "audio";
+export type TrackKind = "video" | "caption" | "broll" | "audio" | "elements";
 
 export interface MediaAsset {
   id: string;

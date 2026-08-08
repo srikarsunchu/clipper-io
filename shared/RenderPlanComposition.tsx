@@ -188,7 +188,7 @@ export const RenderPlanComposition: React.FC<RenderPlanCompositionProps> = ({ pl
             const durationFrames = Math.max(1, Math.round(layer.durationSec * plan.fps));
             return (
               <Sequence key={index} from={fromFrame} durationInFrames={durationFrames} layout="none">
-                <TextLayerView layer={layer} />
+                <TextLayerView layer={layer} compositionWidth={plan.width} />
               </Sequence>
             );
           }
@@ -293,14 +293,19 @@ function ImageLayerView({ layer, compositionWidth, compositionHeight, durationFr
   );
 }
 
-function TextLayerView({ layer }: { layer: TextLayer }) {
+function TextLayerView({ layer, compositionWidth }: { layer: TextLayer; compositionWidth: number }) {
   const justify = layer.alignment === "left" ? "flex-start" : layer.alignment === "right" ? "flex-end" : "center";
+  // typography.fontSize is a fraction of composition width (same convention
+  // captions use via STYLE_PRESETS.fontSize) so text scales with the output
+  // resolution instead of being a fixed pixel size that reads huge or
+  // invisible depending on export dimensions.
+  const fontSize = compositionWidth * layer.typography.fontSize;
   return (
     <AbsoluteFill style={{ justifyContent: "center", alignItems: justify, padding: "0 8%", opacity: layer.opacity }}>
       <div
         style={{
           fontFamily: layer.typography.fontFamily ?? interFont,
-          fontSize: layer.typography.fontSize,
+          fontSize,
           fontWeight: layer.typography.weight,
           color: layer.typography.color,
           textAlign: layer.alignment,

@@ -3004,6 +3004,12 @@ select:focus-visible {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent), 0 4px 12px rgba(47, 111, 237, 0.14);
 }
+.timeline-media-item.pending-delete {
+  opacity: 0.45;
+  border-color: #e0453c;
+  box-shadow: 0 0 0 1px #e0453c, 0 4px 12px rgba(224, 69, 60, 0.25);
+  cursor: not-allowed;
+}
 .timeline-media-item video,
 .timeline-media-item img {
   position: absolute;

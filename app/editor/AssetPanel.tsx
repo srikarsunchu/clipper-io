@@ -37,6 +37,7 @@ export function AssetPanel({
   canRestoreSource,
   hasTranscript,
   hasGeneration,
+  onAddText,
 }: {
   tool: EditorTool;
   media: MediaAsset[];
@@ -60,6 +61,7 @@ export function AssetPanel({
   canRestoreSource: boolean;
   hasTranscript: boolean;
   hasGeneration: boolean;
+  onAddText: () => void;
 }) {
   const [selectedTypes, setSelectedTypes] = useState<AiClipType[]>(["best", "hot-take", "educational"]);
   const [candidateCount, setCandidateCount] = useState(6);
@@ -203,10 +205,44 @@ export function AssetPanel({
     );
   }
 
+  if (tool === "audio") {
+    return (
+      <>
+        <PanelHead title="Audio" />
+        <label className="upload-drop">
+          <span>♫</span><strong>Upload audio</strong><small>Music or sound effects · placed on the Audio track</small>
+          <input type="file" accept="audio/*" onChange={loadSource} />
+        </label>
+        <div className="panel-section-title"><span>Project media</span><small>{media.filter((item) => item.mimeType.startsWith("audio/")).length}</small></div>
+        <div className="media-grid">
+          {media.filter((item) => item.mimeType.startsWith("audio/")).map((item) => (
+            <button className="media-card" key={item.id} onClick={() => onSelectMedia(item.id)}>
+              <MediaThumbnail media={item} />
+              <strong>{item.fileName}</strong>
+            </button>
+          ))}
+          {!media.some((item) => item.mimeType.startsWith("audio/")) && (
+            <p className="inspector-copy">No audio yet — upload a file above. Volume, fades, and trimming live in the Inspector once it&rsquo;s on the timeline.</p>
+          )}
+        </div>
+      </>
+    );
+  }
+
+  if (tool === "elements") {
+    return (
+      <>
+        <PanelHead title="Elements" />
+        <button className="magic-action" onClick={onAddText}>
+          <span>T</span><div><strong>Add text card</strong><small>Editable caption-style text on its own track</small></div><b>＋</b>
+        </button>
+        <p className="inspector-copy panel-message">Select a text card on the timeline to edit its content, size, color, and alignment in the Inspector.</p>
+      </>
+    );
+  }
+
   const planned = {
     broll: ["B-roll", "Contextual stock search and AI-recommended cutaways will live here."],
-    audio: ["Audio", "Voice cleanup, music, and sound effects are planned for this workspace."],
-    elements: ["Elements", "Text, shapes, brand assets, and generated scenes are planned."],
   }[tool] ?? ["Workspace", "This workspace is planned."];
 
   return (
