@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import { projectGenerateRouter } from "./routes/generate.js";
 import { mediaFileRouter, projectMediaRouter } from "./routes/media.js";
 import { projectsRouter } from "./routes/projects.js";
 import { projectRenderRouter, renderFileRouter } from "./routes/render.js";
@@ -21,6 +22,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 app.use("/projects", projectsRouter);
 app.use("/projects", projectMediaRouter);
 app.use("/projects", projectRenderRouter);
+app.use("/projects", projectGenerateRouter);
 app.use("/media", mediaFileRouter);
 app.use("/renders", renderFileRouter);
 

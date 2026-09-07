@@ -110,3 +110,25 @@ export function trackFaces(
     body: JSON.stringify({ mediaId, segments }),
   }).then((response) => asJson<Project>(response));
 }
+
+export type TtsVoice = "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer" | "ash" | "coral" | "sage";
+
+// Generation is best-effort and can be slow (a few seconds per call) --
+// callers should show their own pending state rather than assume this
+// resolves quickly. Placed onto the project's Audio/Elements track by the
+// sidecar itself so the caller doesn't have to hand-assemble a TimelineItem.
+export function generateVoiceover(projectId: string, text: string, voice?: TtsVoice): Promise<Project> {
+  return fetch(`${SIDECAR_URL}/projects/${projectId}/generate/voice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, voice }),
+  }).then((response) => asJson<Project>(response));
+}
+
+export function generateImage(projectId: string, prompt: string): Promise<Project> {
+  return fetch(`${SIDECAR_URL}/projects/${projectId}/generate/image`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  }).then((response) => asJson<Project>(response));
+}

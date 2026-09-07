@@ -52,3 +52,10 @@ next-env.d.ts
 
 # python bytecode cache
 __pycache__/
+
+# third-party clones checked out alongside Clipwire for reference -- not part of the project
+/editor/
+/dsgn-knldg/
+
+# local scratch
+scratch-delete-repro.mjs

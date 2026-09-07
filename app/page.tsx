@@ -16,9 +16,10 @@ import {
   withVideoTrim,
   type CaptionCue,
 } from "../shared/timeline-math";
-import { createProject, fetchProject, saveProjectTimeline, transcribeMedia, uploadMedia, renderProject, renderDownloadUrl, findMoments, trackFaces, type FindMomentsPreferences, type MomentCandidate } from "./sidecar-client";
+import { createProject, fetchProject, saveProjectTimeline, transcribeMedia, uploadMedia, renderProject, renderDownloadUrl, findMoments, trackFaces, generateVoiceover, generateImage, type FindMomentsPreferences, type MomentCandidate, type TtsVoice } from "./sidecar-client";
 import { AssetPanel } from "./editor/AssetPanel";
 import { EditorTopbar, ToolRail, type EditorTool } from "./editor/EditorChrome";
+import { getFormatPreset, previewBoxSize, type FormatId, type FormatPreset } from "./editor/formats";
 import { InspectorPanel } from "./editor/InspectorPanel";
 import { PreviewStage } from "./editor/PreviewStage";
 import { Timeline } from "./editor/timeline/Timeline";
@@ -37,6 +38,8 @@ export default function EditorPage() {
   const [tool, setTool] = useState<Tool>("media");
   const [layout, setLayout] = useState<Layout>("split");
   const [captionStyle, setCaptionStyle] = useState<CaptionStyle>("pop");
+  const [formatId, setFormatId] = useState<FormatId>("9:16");
+  const format = getFormatPreset(formatId);
   const [inspector, setInspector] = useState<Inspector>("clip");
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -56,6 +59,8 @@ export default function EditorPage() {
   const [transcribing, setTranscribing] = useState(false);
   const [findingMoments, setFindingMoments] = useState(false);
   const [moments, setMoments] = useState<MomentCandidate[]>([]);
+  const [generatingVoice, setGeneratingVoice] = useState(false);
+  const [generatingImage, setGeneratingImage] = useState(false);
   const playerRef = useRef<PlayerRef>(null);
   // Player mounts/unmounts as `hasMedia` flips (e.g. once the project finishes
   // loading), which a plain useRef never signals -- a `useEffect(..., [])`
@@ -185,6 +190,7 @@ export default function EditorPage() {
   }, [layout, captionStyle]);
 
   useEffect(() => {
+    console.log("[DEBUG] keydown effect (re)attached, currentTime=", currentTime, "activeClipId=", activeClipId, "selectedLayer=", selectedLayer);
     const handleKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       // Selecting a timeline clip focuses its underlying <button> -- excluding
@@ -198,10 +204,17 @@ export default function EditorPage() {
       if (event.key.toLowerCase() === "s") splitClip();
       if (event.key === "ArrowLeft") { event.preventDefault(); syncVideoTime(currentTime - (event.shiftKey ? 5 : 1 / 30)); }
       if (event.key === "ArrowRight") { event.preventDefault(); syncVideoTime(currentTime + (event.shiftKey ? 5 : 1 / 30)); }
-      if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); deleteClipAtPlayhead(); }
+      if (event.key === "Delete" || event.key === "Backspace") {
+        console.log("[DEBUG] handleKey firing delete, currentTime=", currentTime, "selectedLayer=", selectedLayer);
+        event.preventDefault();
+        deleteClipAtPlayhead();
+      }
     };
     window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
+    return () => {
+      console.log("[DEBUG] keydown effect cleanup (listener removed), currentTime=", currentTime);
+      window.removeEventListener("keydown", handleKey);
+    };
   });
 
   useEffect(() => {
@@ -277,6 +290,36 @@ export default function EditorPage() {
       flash(error instanceof Error ? error.message : "Transcription failed");
     } finally {
       setTranscribing(false);
+    }
+  }
+
+  async function runGenerateVoiceover(text: string, voice?: TtsVoice) {
+    if (!project) return;
+    setGeneratingVoice(true);
+    flash("Generating voiceover…");
+    try {
+      const updated = await generateVoiceover(project.id, text, voice);
+      setProject(normalizeProject(updated));
+      flash("Voiceover added to the Audio track");
+    } catch (error) {
+      flash(error instanceof Error ? error.message : "Voiceover generation failed");
+    } finally {
+      setGeneratingVoice(false);
+    }
+  }
+
+  async function runGenerateImage(prompt: string) {
+    if (!project) return;
+    setGeneratingImage(true);
+    flash("Generating image…");
+    try {
+      const updated = await generateImage(project.id, prompt);
+      setProject(normalizeProject(updated));
+      flash("Image added to the Elements track");
+    } catch (error) {
+      flash(error instanceof Error ? error.message : "Image generation failed");
+    } finally {
+      setGeneratingImage(false);
     }
   }
 
@@ -403,12 +446,14 @@ export default function EditorPage() {
   }
 
   async function deleteClipAtPlayhead() {
+    console.log("[DEBUG] deleteClipAtPlayhead CALLED, currentTime=", currentTime, "project.clips=", project?.clips.map(c => ({id: c.id, startSec: c.startSec, durationSec: c.durationSec})));
     if (!project) return;
     const selectedTrack = project.tracks.find((track) => track.id === selectedLayer || track.kind === selectedLayer);
     const candidates = selectedTrack
       ? project.clips.filter((clip) => clip.trackId === selectedTrack.id)
       : videoClips;
     const clip = findClipAtTimelineTime(candidates, currentTime);
+    console.log("[DEBUG] deleteClipAtPlayhead found clip=", clip?.id, "at startSec=", clip?.startSec);
     if (!clip) {
       flash("No clip under the playhead");
       return;
@@ -421,6 +466,7 @@ export default function EditorPage() {
           ? { ...existing, startSec: existing.startSec - removedLen }
           : existing
       );
+    console.log("[DEBUG] deleteClipAtPlayhead nextClips=", nextClips.map(c => c.id));
     await persistClips(nextClips);
     setCurrentTime(Math.min(currentTime, clip.startSec));
     flash("Clip deleted");
@@ -468,12 +514,12 @@ export default function EditorPage() {
       // about what a given project actually contains.
       const result = await renderProject(project.id, {
         style: captionStyle,
-        width: 1080,
-        height: 1920,
+        width: format.width,
+        height: format.height,
         fps: 30,
       });
       setRenderDownload(renderDownloadUrl(result.downloadUrl));
-      flash("Render complete · 1080 × 1920 MP4");
+      flash(`Render complete · ${format.width} × ${format.height} MP4`);
     } catch (error) {
       setRenderError(error instanceof Error ? error.message : "Render failed");
     } finally {
@@ -550,8 +596,12 @@ export default function EditorPage() {
       <EditorTopbar
         projectName={project?.name ?? "Loading…"}
         duration={formatTime(totalDuration)}
+        format={formatId}
+        onFormatChange={(nextFormat) => {
+          setFormatId(nextFormat);
+          flash(`Format set to ${nextFormat} · ${getFormatPreset(nextFormat).description}`);
+        }}
         onExport={() => setShowExport(true)}
-        onFormat={() => flash("Format is optimized for Shorts, Reels, and TikTok")}
       />
 
       <section className="editing-grid">
@@ -585,6 +635,10 @@ export default function EditorPage() {
               project?.aiGenerations?.some((generation) => generation.sourceMediaId === activeMedia.id)
             )}
             onAddText={addTextItem}
+            onGenerateVoiceover={runGenerateVoiceover}
+            generatingVoice={generatingVoice}
+            onGenerateImage={runGenerateImage}
+            generatingImage={generatingImage}
           />
         </aside>
 
@@ -600,6 +654,7 @@ export default function EditorPage() {
           muted={muted}
           captionsOn={captionsOn}
           captionStyle={captionStyle}
+          format={format}
           onZoomChange={setZoom}
           onTogglePlayback={togglePlayback}
           onSeek={syncVideoTime}
@@ -646,6 +701,7 @@ export default function EditorPage() {
           rendering={rendering}
           downloadUrl={renderDownload}
           error={renderError}
+          format={format}
           close={() => {
             if (!rendering) {
               setShowExport(false);
@@ -661,8 +717,9 @@ export default function EditorPage() {
   );
 }
 
-function ExportModal({ rendering, downloadUrl, error, close, startRender }: { rendering: boolean; downloadUrl: string | null; error: string | null; close: () => void; startRender: () => void }) {
-  return <div className="modal-backdrop" onMouseDown={close}><section className="export-modal" onMouseDown={(event) => event.stopPropagation()}><header><div><span>Export clip</span><h2>Render with captions</h2></div><button onClick={close}>×</button></header><div className="export-preview"><div className="mini-export-video"><span>1080 <em>×</em> 1920</span></div><div><strong>Ready to render</strong><small>Exports as MP4 · H.264, captions burned in using your selected caption style</small></div></div>{downloadUrl ? <div className="rendering"><span><strong>Render complete</strong></span><small>Your captioned MP4 is ready.</small></div> : rendering ? <div className="rendering"><span><strong>Rendering…</strong></span><small>This can take a little while depending on clip length.</small></div> : error ? <div className="rendering"><span><strong>Render failed</strong></span><small>{error}</small></div> : null}<footer>{downloadUrl ? <><button onClick={close}>Close</button><a className="export-confirm" href={downloadUrl} download>Download MP4 <span>↓</span></a></> : <><button onClick={close} disabled={rendering}>Cancel</button><button className="export-confirm" onClick={startRender} disabled={rendering}>{rendering ? "Rendering…" : "Export MP4"} <span>↗</span></button></>}</footer></section></div>;
+function ExportModal({ rendering, downloadUrl, error, format, close, startRender }: { rendering: boolean; downloadUrl: string | null; error: string | null; format: FormatPreset; close: () => void; startRender: () => void }) {
+  const miniBox = previewBoxSize(format, 92);
+  return <div className="modal-backdrop" onMouseDown={close}><section className="export-modal" onMouseDown={(event) => event.stopPropagation()}><header><div><span>Export clip</span><h2>Render with captions</h2></div><button onClick={close}>×</button></header><div className="export-preview"><div className="mini-export-video" style={{ width: miniBox.width, height: miniBox.height }}><span>{format.width} <em>×</em> {format.height}</span></div><div><strong>Ready to render</strong><small>Exports as MP4 · H.264 · {format.id} · captions burned in using your selected caption style</small></div></div>{downloadUrl ? <div className="rendering"><span><strong>Render complete</strong></span><small>Your captioned MP4 is ready.</small></div> : rendering ? <div className="rendering"><span><strong>Rendering…</strong></span><small>This can take a little while depending on clip length.</small></div> : error ? <div className="rendering"><span><strong>Render failed</strong></span><small>{error}</small></div> : null}<footer>{downloadUrl ? <><button onClick={close}>Close</button><a className="export-confirm" href={downloadUrl} download>Download MP4 <span>↓</span></a></> : <><button onClick={close} disabled={rendering}>Cancel</button><button className="export-confirm" onClick={startRender} disabled={rendering}>{rendering ? "Rendering…" : "Export MP4"} <span>↗</span></button></>}</footer></section></div>;
 }
 
 function formatTime(seconds: number) { const whole = Math.floor(seconds); const hundredths = Math.floor((seconds - whole) * 100); return `00:${String(whole).padStart(2,"0")}.${String(hundredths).padStart(2,"0")}`; }

@@ -7,6 +7,7 @@ import type { Project } from "../../shared/timeline";
 import { buildRenderPlan } from "../../shared/render-plan";
 import { RenderPlanComposition } from "../../shared/RenderPlanComposition";
 import { mediaFileUrl } from "../sidecar-client";
+import { previewBoxSize, type FormatPreset } from "./formats";
 
 type Layout = "focus" | "split" | "gameplay";
 
@@ -24,6 +25,7 @@ export const PreviewStage = forwardRef<PlayerRef, {
   zoom: number;
   captionsOn: boolean;
   captionStyle: CaptionStyleId;
+  format: FormatPreset;
   currentTime: number;
   totalDuration: number;
   playing: boolean;
@@ -40,6 +42,7 @@ export const PreviewStage = forwardRef<PlayerRef, {
     zoom,
     captionsOn,
     captionStyle,
+    format,
     currentTime,
     totalDuration,
     playing,
@@ -53,14 +56,15 @@ export const PreviewStage = forwardRef<PlayerRef, {
 ) {
   const plan = useMemo(() => {
     if (!project) return null;
-    const full = buildRenderPlan(project, mediaFileUrl, { captionStyle });
+    const full = buildRenderPlan(project, mediaFileUrl, { captionStyle, width: format.width, height: format.height });
     // Captions on/off is a preview-only toggle -- export always burns them in
     // when a transcript exists, so this filters the *preview's* plan only,
     // never buildRenderPlan's own output.
     if (captionsOn) return full;
     return { ...full, layers: full.layers.filter((layer) => layer.kind !== "captions") };
-  }, [project, captionStyle, captionsOn]);
+  }, [project, captionStyle, captionsOn, format]);
   const durationInFrames = plan ? Math.max(1, Math.round(plan.durationSec * plan.fps)) : 1;
+  const canvasBox = previewBoxSize(format);
 
   return (
     <section className="stage-zone">
@@ -71,10 +75,13 @@ export const PreviewStage = forwardRef<PlayerRef, {
           <button aria-label="Zoom in preview" onClick={() => onZoomChange(Math.min(120, zoom + 8))}>＋</button>
           <button onClick={() => onZoomChange(72)}>Fit</button>
         </div>
-        <div><span className="preview-mode-label">Preview · 9:16</span></div>
+        <div><span className="preview-mode-label">Preview · {format.id}</span></div>
       </div>
       <div className="canvas-space">
-        <div className={`video-canvas layout-${layout}`} style={{ transform: `scale(${zoom / 100})` }}>
+        <div
+          className={`video-canvas layout-${layout}`}
+          style={{ width: canvasBox.width, height: canvasBox.height, transform: `scale(${zoom / 100})` }}
+        >
           {hasMedia && plan ? (
             <Player
               ref={playerRef}
@@ -93,7 +100,7 @@ export const PreviewStage = forwardRef<PlayerRef, {
             <div className="empty-canvas">
               <span>▧</span>
               <strong>Add media to start</strong>
-              <small>Your 9:16 composition will appear here</small>
+              <small>Your {format.id} composition will appear here</small>
             </div>
           )}
           {hasMedia && <div className="selection-box"><i className="handle tl" /><i className="handle tr" /><i className="handle bl" /><i className="handle br" /></div>}

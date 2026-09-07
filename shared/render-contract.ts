@@ -101,9 +101,50 @@ export interface CaptionLayer {
   kind: "captions";
   style: CaptionStyleId;
   cues: RenderCue[];
+  /** overrides the style preset's own accent/highlight color without
+   * touching its layout -- the preset still owns placement, motion, and
+   * type; this is the one thing a caller may recolor per-project. */
+  accentOverride?: string;
 }
 
-export type RenderLayer = VideoLayer | ImageLayer | TextLayer | AudioLayer | CaptionLayer;
+/** Local transform applied around a group's own center -- composed on top of
+ * (not replacing) each child's own transform when the group is flattened to
+ * layers. */
+export interface GroupTransform {
+  scale: number;
+  x: number;
+  y: number;
+  rotationDeg: number;
+}
+
+export interface GroupLayer {
+  kind: "group";
+  sequenceStartSec: number;
+  durationSec: number;
+  opacity: number;
+  transform: GroupTransform;
+  /** already flattened, edit-time-absolute child layers -- a group never
+   * needs a second pass of local-to-absolute-time math at render time. */
+  children: RenderLayer[];
+}
+
+export interface HtmlOverlayLayer {
+  kind: "htmlOverlay";
+  sequenceStartSec: number;
+  durationSec: number;
+  opacity: number;
+  template: string;
+  props: Record<string, unknown>;
+}
+
+export type RenderLayer =
+  | VideoLayer
+  | ImageLayer
+  | TextLayer
+  | AudioLayer
+  | CaptionLayer
+  | GroupLayer
+  | HtmlOverlayLayer;
 
 /** Everything Remotion needs to render one composition, and nothing it needs
  * to infer -- resolved asset URLs, resolved edit-time positions, resolved

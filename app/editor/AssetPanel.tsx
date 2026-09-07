@@ -10,7 +10,7 @@ import {
   type AiClipType,
   type FindMomentsPreferences,
 } from "../../shared/ai-edit";
-import { mediaFileUrl, type MomentCandidate } from "../sidecar-client";
+import { mediaFileUrl, type MomentCandidate, type TtsVoice } from "../sidecar-client";
 import type { EditorTool } from "./EditorChrome";
 import { captionStyles } from "./caption-styles";
 
@@ -38,6 +38,10 @@ export function AssetPanel({
   hasTranscript,
   hasGeneration,
   onAddText,
+  onGenerateVoiceover,
+  generatingVoice,
+  onGenerateImage,
+  generatingImage,
 }: {
   tool: EditorTool;
   media: MediaAsset[];
@@ -62,11 +66,18 @@ export function AssetPanel({
   hasTranscript: boolean;
   hasGeneration: boolean;
   onAddText: () => void;
+  onGenerateVoiceover: (text: string, voice?: TtsVoice) => void;
+  generatingVoice: boolean;
+  onGenerateImage: (prompt: string) => void;
+  generatingImage: boolean;
 }) {
   const [selectedTypes, setSelectedTypes] = useState<AiClipType[]>(["best", "hot-take", "educational"]);
   const [candidateCount, setCandidateCount] = useState(6);
   const [durationRange, setDurationRange] = useState("15-45");
   const [direction, setDirection] = useState("");
+  const [voiceoverText, setVoiceoverText] = useState("");
+  const [voice, setVoice] = useState<TtsVoice>("alloy");
+  const [imagePrompt, setImagePrompt] = useState("");
 
   function toggleClipType(type: AiClipType) {
     setSelectedTypes((current) => {
@@ -213,6 +224,35 @@ export function AssetPanel({
           <span>♫</span><strong>Upload audio</strong><small>Music or sound effects · placed on the Audio track</small>
           <input type="file" accept="audio/*" onChange={loadSource} />
         </label>
+        <div className="panel-section-title"><span>AI voiceover</span></div>
+        <div className="campaign-assist">
+          <span>Faceless narration</span>
+          <textarea
+            className="ai-prompt"
+            value={voiceoverText}
+            onChange={(event) => setVoiceoverText(event.target.value)}
+            placeholder="Type the line you want narrated…"
+            maxLength={2000}
+          />
+          <div className="ai-setting-row">
+            <label><span>Voice</span>
+              <select value={voice} onChange={(event) => setVoice(event.target.value as TtsVoice)}>
+                <option value="alloy">Alloy</option>
+                <option value="onyx">Onyx</option>
+                <option value="nova">Nova</option>
+                <option value="shimmer">Shimmer</option>
+                <option value="echo">Echo</option>
+                <option value="fable">Fable</option>
+              </select>
+            </label>
+          </div>
+          <button
+            disabled={generatingVoice || !voiceoverText.trim()}
+            onClick={() => onGenerateVoiceover(voiceoverText.trim(), voice)}
+          >
+            {generatingVoice ? "Generating…" : "Generate voiceover"}
+          </button>
+        </div>
         <div className="panel-section-title"><span>Project media</span><small>{media.filter((item) => item.mimeType.startsWith("audio/")).length}</small></div>
         <div className="media-grid">
           {media.filter((item) => item.mimeType.startsWith("audio/")).map((item) => (
@@ -237,6 +277,20 @@ export function AssetPanel({
           <span>T</span><div><strong>Add text card</strong><small>Editable caption-style text on its own track</small></div><b>＋</b>
         </button>
         <p className="inspector-copy panel-message">Select a text card on the timeline to edit its content, size, color, and alignment in the Inspector.</p>
+        <div className="panel-section-title"><span>AI image</span></div>
+        <div className="campaign-assist">
+          <span>Generated visual</span>
+          <textarea
+            className="ai-prompt"
+            value={imagePrompt}
+            onChange={(event) => setImagePrompt(event.target.value)}
+            placeholder="e.g. Clean product shot of a skincare bottle on a marble surface, soft studio light"
+            maxLength={2000}
+          />
+          <button disabled={generatingImage || !imagePrompt.trim()} onClick={() => onGenerateImage(imagePrompt.trim())}>
+            {generatingImage ? "Generating…" : "Generate image"}
+          </button>
+        </div>
       </>
     );
   }

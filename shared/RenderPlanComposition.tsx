@@ -7,13 +7,17 @@ import type {
   AudioLayer,
   CaptionLayer,
   CaptionStyleId,
+  GroupLayer,
+  HtmlOverlayLayer,
   ImageLayer,
   RenderCue,
+  RenderLayer,
   RenderPlan,
   TextLayer,
   VideoLayer,
 } from "./render-contract";
 import { interpolateFacePoint } from "./timeline-math";
+import { getOverlayTemplate } from "./overlays/registry";
 
 const { fontFamily: antonFont } = loadAnton("normal", { weights: ["400"], subsets: ["latin"] });
 const { fontFamily: interFont } = loadInter("normal", { weights: ["800"], subsets: ["latin"] });
@@ -163,54 +167,115 @@ const STYLE_PRESETS: Record<CaptionStyleId, StylePreset> = {
 export const RenderPlanComposition: React.FC<RenderPlanCompositionProps> = ({ plan }) => {
   return (
     <AbsoluteFill style={{ backgroundColor: "#000000" }}>
-      {plan.layers.map((layer, index) => {
-        switch (layer.kind) {
-          case "video": {
-            const fromFrame = Math.round(layer.sequenceStartSec * plan.fps);
-            const durationFrames = Math.max(1, Math.round((layer.trimEndSec - layer.trimStartSec) * plan.fps));
-            return (
-              <Sequence key={index} from={fromFrame} durationInFrames={durationFrames} layout="none">
-                <VideoLayerView layer={layer} compositionWidth={plan.width} compositionHeight={plan.height} fps={plan.fps} />
-              </Sequence>
-            );
-          }
-          case "image": {
-            const fromFrame = Math.round(layer.sequenceStartSec * plan.fps);
-            const durationFrames = Math.max(1, Math.round(layer.durationSec * plan.fps));
-            return (
-              <Sequence key={index} from={fromFrame} durationInFrames={durationFrames} layout="none">
-                <ImageLayerView layer={layer} compositionWidth={plan.width} compositionHeight={plan.height} durationFrames={durationFrames} />
-              </Sequence>
-            );
-          }
-          case "text": {
-            const fromFrame = Math.round(layer.sequenceStartSec * plan.fps);
-            const durationFrames = Math.max(1, Math.round(layer.durationSec * plan.fps));
-            return (
-              <Sequence key={index} from={fromFrame} durationInFrames={durationFrames} layout="none">
-                <TextLayerView layer={layer} compositionWidth={plan.width} />
-              </Sequence>
-            );
-          }
-          case "audio": {
-            const fromFrame = Math.round(layer.sequenceStartSec * plan.fps);
-            const durationFrames = Math.max(1, Math.round((layer.trimEndSec - layer.trimStartSec) * plan.fps));
-            return (
-              <Sequence key={index} from={fromFrame} durationInFrames={durationFrames} layout="none">
-                <AudioLayerView layer={layer} fps={plan.fps} />
-              </Sequence>
-            );
-          }
-          case "captions": {
-            return <CaptionLayerView key={index} layer={layer} fps={plan.fps} width={plan.width} />;
-          }
-          default:
-            return null;
-        }
-      })}
+      {plan.layers.map((layer, index) => (
+        <RenderLayerView key={index} layer={layer} plan={plan} />
+      ))}
     </AbsoluteFill>
   );
 };
+
+/** Renders one flattened layer -- shared by the top-level composition and by
+ * GroupLayerView, so a group's already-flattened children paint through
+ * exactly the same per-kind logic as top-level layers rather than a second,
+ * drifting copy of it. */
+function RenderLayerView({ layer, plan }: { layer: RenderLayer; plan: RenderPlan }) {
+  switch (layer.kind) {
+    case "video": {
+      const fromFrame = Math.round(layer.sequenceStartSec * plan.fps);
+      const durationFrames = Math.max(1, Math.round((layer.trimEndSec - layer.trimStartSec) * plan.fps));
+      return (
+        <Sequence from={fromFrame} durationInFrames={durationFrames} layout="none">
+          <VideoLayerView layer={layer} compositionWidth={plan.width} compositionHeight={plan.height} fps={plan.fps} />
+        </Sequence>
+      );
+    }
+    case "image": {
+      const fromFrame = Math.round(layer.sequenceStartSec * plan.fps);
+      const durationFrames = Math.max(1, Math.round(layer.durationSec * plan.fps));
+      return (
+        <Sequence from={fromFrame} durationInFrames={durationFrames} layout="none">
+          <ImageLayerView layer={layer} compositionWidth={plan.width} compositionHeight={plan.height} durationFrames={durationFrames} />
+        </Sequence>
+      );
+    }
+    case "text": {
+      const fromFrame = Math.round(layer.sequenceStartSec * plan.fps);
+      const durationFrames = Math.max(1, Math.round(layer.durationSec * plan.fps));
+      return (
+        <Sequence from={fromFrame} durationInFrames={durationFrames} layout="none">
+          <TextLayerView layer={layer} compositionWidth={plan.width} />
+        </Sequence>
+      );
+    }
+    case "audio": {
+      const fromFrame = Math.round(layer.sequenceStartSec * plan.fps);
+      const durationFrames = Math.max(1, Math.round((layer.trimEndSec - layer.trimStartSec) * plan.fps));
+      return (
+        <Sequence from={fromFrame} durationInFrames={durationFrames} layout="none">
+          <AudioLayerView layer={layer} fps={plan.fps} />
+        </Sequence>
+      );
+    }
+    case "captions": {
+      return <CaptionLayerView layer={layer} fps={plan.fps} width={plan.width} />;
+    }
+    case "group": {
+      const fromFrame = Math.round(layer.sequenceStartSec * plan.fps);
+      const durationFrames = Math.max(1, Math.round(layer.durationSec * plan.fps));
+      return (
+        <Sequence from={fromFrame} durationInFrames={durationFrames} layout="none">
+          <GroupLayerView layer={layer} plan={plan} />
+        </Sequence>
+      );
+    }
+    case "htmlOverlay": {
+      const fromFrame = Math.round(layer.sequenceStartSec * plan.fps);
+      const durationFrames = Math.max(1, Math.round(layer.durationSec * plan.fps));
+      return (
+        <Sequence from={fromFrame} durationInFrames={durationFrames} layout="none">
+          <HtmlOverlayLayerView layer={layer} plan={plan} durationFrames={durationFrames} />
+        </Sequence>
+      );
+    }
+    default:
+      return null;
+  }
+}
+
+function GroupLayerView({ layer, plan }: { layer: GroupLayer; plan: RenderPlan }) {
+  const { scale, x, y, rotationDeg } = layer.transform;
+  return (
+    <AbsoluteFill
+      style={{
+        opacity: layer.opacity,
+        transform: `translate(${x}px, ${y}px) rotate(${rotationDeg}deg) scale(${scale})`,
+        transformOrigin: "center center",
+      }}
+    >
+      {layer.children.map((child, index) => (
+        <RenderLayerView key={index} layer={child} plan={plan} />
+      ))}
+    </AbsoluteFill>
+  );
+}
+
+function HtmlOverlayLayerView({ layer, plan, durationFrames }: { layer: HtmlOverlayLayer; plan: RenderPlan; durationFrames: number }) {
+  const frame = useCurrentFrame();
+  const Template = getOverlayTemplate(layer.template);
+  if (!Template) return null;
+  return (
+    <AbsoluteFill style={{ opacity: layer.opacity }}>
+      <Template
+        props={layer.props}
+        frame={frame}
+        durationFrames={durationFrames}
+        fps={plan.fps}
+        compositionWidth={plan.width}
+        compositionHeight={plan.height}
+      />
+    </AbsoluteFill>
+  );
+}
 
 function VideoLayerView({ layer, compositionWidth, compositionHeight, fps }: {
   layer: VideoLayer; compositionWidth: number; compositionHeight: number; fps: number;
@@ -338,7 +403,12 @@ function AudioLayerView({ layer, fps }: { layer: AudioLayer; fps: number }) {
 }
 
 function CaptionLayerView({ layer, fps, width }: { layer: CaptionLayer; fps: number; width: number }) {
-  const preset = STYLE_PRESETS[layer.style] ?? STYLE_PRESETS.pop;
+  // The preset still owns every layout/motion/type decision; an accent
+  // override only ever recolors the one property (`highlight`) a caller is
+  // meant to touch per-project, rather than opening every preset field to
+  // ad hoc per-call overrides.
+  const basePreset = STYLE_PRESETS[layer.style] ?? STYLE_PRESETS.pop;
+  const preset = layer.accentOverride ? { ...basePreset, highlight: layer.accentOverride } : basePreset;
   return (
     <>
       {layer.cues.map((cue, index) => {

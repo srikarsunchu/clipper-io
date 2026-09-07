@@ -466,6 +466,75 @@ test("buildRenderPlan builds image/text/audio layers with sensible defaults", ()
   assert.equal((audioLayer as { volume: number }).volume, 1);
 });
 
+test("buildRenderPlan flattens a group's children with group-local time offset and composes its transform", () => {
+  const project = baseProject({
+    tracks: [{ id: "elements", kind: "elements", name: "Elements", order: 0 }],
+    clips: [
+      {
+        id: "grp",
+        trackId: "elements",
+        kind: "group",
+        startSec: 10,
+        durationSec: 4,
+        transform: { scale: 1.2, x: 5, y: -5 },
+        children: [
+          { id: "child-text", trackId: "elements", kind: "text", text: "Hi", startSec: 1, durationSec: 2 },
+          { id: "child-overlay", trackId: "elements", kind: "htmlOverlay", template: "priceBadge", startSec: 0, durationSec: 4, props: { newPrice: "$9" } },
+        ],
+      },
+    ] as unknown as TimelineItem[],
+  });
+  const plan = buildRenderPlan(project, (id) => `https://cdn.example/${id}`);
+  assert.equal(plan.layers.length, 1);
+  const group = plan.layers[0];
+  assert.equal(group.kind, "group");
+  if (group.kind !== "group") throw new Error("unreachable");
+  assert.equal(group.sequenceStartSec, 10);
+  assert.equal(group.transform.scale, 1.2);
+  assert.equal(group.transform.x, 5);
+  assert.equal(group.children.length, 2);
+  const [childText, childOverlay] = group.children;
+  assert.equal(childText.kind, "text");
+  // child startSec (1) is group-local -- flattened to an edit-time-absolute
+  // sequenceStartSec of groupStart (10) + childStart (1).
+  assert.equal((childText as { sequenceStartSec: number }).sequenceStartSec, 11);
+  assert.equal(childOverlay.kind, "htmlOverlay");
+  assert.equal((childOverlay as { sequenceStartSec: number }).sequenceStartSec, 10);
+  assert.equal((childOverlay as { template: string }).template, "priceBadge");
+  assert.deepEqual((childOverlay as { props: Record<string, unknown> }).props, { newPrice: "$9" });
+});
+
+test("buildRenderPlan builds an htmlOverlay layer at the top level with default props", () => {
+  const project = baseProject({
+    tracks: [{ id: "elements", kind: "elements", name: "Elements", order: 0 }],
+    clips: [
+      { id: "overlay", trackId: "elements", kind: "htmlOverlay", template: "phoneNotification", startSec: 2, durationSec: 3 },
+    ] as unknown as TimelineItem[],
+  });
+  const plan = buildRenderPlan(project, (id) => `https://cdn.example/${id}`);
+  assert.equal(plan.layers.length, 1);
+  const layer = plan.layers[0];
+  assert.equal(layer.kind, "htmlOverlay");
+  if (layer.kind !== "htmlOverlay") throw new Error("unreachable");
+  assert.equal(layer.sequenceStartSec, 2);
+  assert.equal(layer.template, "phoneNotification");
+  assert.deepEqual(layer.props, {});
+});
+
+test("buildRenderPlan applies a caption accentOverride without changing the preset's other fields", () => {
+  const project = baseProject({
+    clips: [videoItem({ id: "a", trackId: "video", assetId: "m1", trimInSec: 0, trimOutSec: 5, startSec: 0 })],
+    media: [{ id: "m1", fileName: "a.mp4", mimeType: "video/mp4", durationSec: 5, width: 1920, height: 1080, fps: 30, hasAudio: true, createdAt: "now" }],
+    transcript: [{ word: "hi", start: 0, end: 1 }],
+    transcriptMediaId: "m1",
+  });
+  const plan = buildRenderPlan(project, (id) => `https://cdn.example/${id}`, { captionAccentOverride: "#00ff00" });
+  const captionsLayer = plan.layers[plan.layers.length - 1];
+  assert.equal(captionsLayer.kind, "captions");
+  if (captionsLayer.kind !== "captions") throw new Error("unreachable");
+  assert.equal(captionsLayer.accentOverride, "#00ff00");
+});
+
 test("buildRenderPlan appends a captions layer last (paints on top) when a transcript exists for the tracked media", () => {
   const project = baseProject({
     clips: [videoItem({ id: "a", trackId: "video", assetId: "m1", trimInSec: 0, trimOutSec: 5, startSec: 0 })],

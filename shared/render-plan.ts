@@ -1,5 +1,16 @@
-import type { CaptionStyleId, RenderPlan, RenderLayer, VideoLayer, ImageLayer, TextLayer, AudioLayer } from "./render-contract.ts";
+import type {
+  CaptionStyleId,
+  RenderPlan,
+  RenderLayer,
+  VideoLayer,
+  ImageLayer,
+  TextLayer,
+  AudioLayer,
+  GroupLayer,
+  HtmlOverlayLayer,
+} from "./render-contract.ts";
 import type { Project, TimelineItem, Track } from "./timeline.ts";
+import { stableHash } from "./hash.ts";
 import {
   buildCaptionCues,
   buildRenderCues,
@@ -16,6 +27,9 @@ export interface BuildRenderPlanOptions {
   height?: number;
   fps?: number;
   captionStyle?: CaptionStyleId;
+  /** recolors the caption preset's accent/highlight without changing its
+   * layout -- see CaptionLayer.accentOverride in render-contract.ts. */
+  captionAccentOverride?: string;
 }
 
 /** Resolves a media asset id to whatever URL the *caller's* environment can
@@ -57,7 +71,7 @@ export function buildRenderPlan(
     return a.startSec - b.startSec;
   });
 
-  const layers: RenderLayer[] = orderedItems.map((item) => buildLayerForItem(item, project, resolveAssetUrl));
+  const layers: RenderLayer[] = orderedItems.map((item) => buildLayerForItem(item, project, resolveAssetUrl, 0));
 
   if (project.transcript?.length && project.transcriptMediaId) {
     const cues = buildCaptionCues(project.transcript);
@@ -67,7 +81,12 @@ export function buildRenderPlan(
       // Captions always paint on top of every other layer, regardless of
       // track order -- there is no product scenario yet where anything
       // should occlude them.
-      layers.push({ kind: "captions", style: captionStyle, cues: renderCues });
+      layers.push({
+        kind: "captions",
+        style: captionStyle,
+        cues: renderCues,
+        accentOverride: options.captionAccentOverride,
+      });
     }
   }
 
@@ -77,7 +96,12 @@ export function buildRenderPlan(
   return { ...plan, planHash: hashPlan(plan) };
 }
 
-function buildLayerForItem(item: TimelineItem, project: Project, resolveAssetUrl: AssetUrlResolver): RenderLayer {
+function buildLayerForItem(
+  item: TimelineItem,
+  project: Project,
+  resolveAssetUrl: AssetUrlResolver,
+  timeOffsetSec: number,
+): RenderLayer {
   switch (item.kind) {
     case "video": {
       const media = project.media.find((asset) => asset.id === item.assetId);
@@ -89,7 +113,7 @@ function buildLayerForItem(item: TimelineItem, project: Project, resolveAssetUrl
         src: resolveAssetUrl(item.assetId),
         trimStartSec: item.trimInSec,
         trimEndSec: item.trimOutSec,
-        sequenceStartSec: item.startSec,
+        sequenceStartSec: timeOffsetSec + item.startSec,
         sourceWidth: media?.width ?? FALLBACK_WIDTH,
         sourceHeight: media?.height ?? FALLBACK_HEIGHT,
         fit: item.fit ?? "cover",
@@ -105,7 +129,7 @@ function buildLayerForItem(item: TimelineItem, project: Project, resolveAssetUrl
       const layer: ImageLayer = {
         kind: "image",
         src: resolveAssetUrl(item.assetId),
-        sequenceStartSec: item.startSec,
+        sequenceStartSec: timeOffsetSec + item.startSec,
         durationSec: item.durationSec,
         sourceWidth: media?.width,
         sourceHeight: media?.height,
@@ -118,7 +142,7 @@ function buildLayerForItem(item: TimelineItem, project: Project, resolveAssetUrl
     case "text": {
       const layer: TextLayer = {
         kind: "text",
-        sequenceStartSec: item.startSec,
+        sequenceStartSec: timeOffsetSec + item.startSec,
         durationSec: item.durationSec,
         opacity: item.opacity ?? 1,
         text: item.text,
@@ -138,10 +162,42 @@ function buildLayerForItem(item: TimelineItem, project: Project, resolveAssetUrl
         src: resolveAssetUrl(item.assetId),
         trimStartSec: item.trimInSec,
         trimEndSec: item.trimOutSec,
-        sequenceStartSec: item.startSec,
+        sequenceStartSec: timeOffsetSec + item.startSec,
         volume: item.volume ?? 1,
         fadeInSec: item.fades?.inSec ?? 0,
         fadeOutSec: item.fades?.outSec ?? 0,
+      };
+      return layer;
+    }
+    case "group": {
+      const groupOffset = timeOffsetSec + item.startSec;
+      const layer: GroupLayer = {
+        kind: "group",
+        sequenceStartSec: groupOffset,
+        durationSec: item.durationSec,
+        opacity: item.opacity ?? 1,
+        transform: {
+          scale: item.transform?.scale ?? 1,
+          x: item.transform?.x ?? 0,
+          y: item.transform?.y ?? 0,
+          rotationDeg: 0,
+        },
+        // Children's own startSec is group-local -- flatten through the same
+        // builder, offset by this group's absolute start, so a group can
+        // nest arbitrarily deep without a second time-mapping pass at render
+        // time.
+        children: item.children.map((child) => buildLayerForItem(child, project, resolveAssetUrl, groupOffset)),
+      };
+      return layer;
+    }
+    case "htmlOverlay": {
+      const layer: HtmlOverlayLayer = {
+        kind: "htmlOverlay",
+        sequenceStartSec: timeOffsetSec + item.startSec,
+        durationSec: item.durationSec,
+        opacity: item.opacity ?? 1,
+        template: item.template,
+        props: item.props ?? {},
       };
       return layer;
     }
@@ -155,28 +211,6 @@ function buildLayerForItem(item: TimelineItem, project: Project, resolveAssetUrl
 const FALLBACK_WIDTH = 1080;
 const FALLBACK_HEIGHT = 1920;
 
-/** Small, portable, deterministic string hash (FNV-1a, 32-bit) over a stable
- * JSON encoding of the plan. Deliberately not a cryptographic hash and not
- * Node's `crypto` module -- this needs to run identically in the browser
- * (editor preview) and under Node (sidecar), and it only needs to be a stable
- * cache key, not collision-resistant against adversarial input. */
 function hashPlan(plan: Omit<RenderPlan, "planHash">): string {
-  const encoded = stableStringify(plan);
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < encoded.length; i++) {
-    hash ^= encoded.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableStringify).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const keys = Object.keys(value as Record<string, unknown>).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
+  return stableHash(plan);
 }

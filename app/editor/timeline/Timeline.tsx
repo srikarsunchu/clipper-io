@@ -185,6 +185,7 @@ export function Timeline({
     if (!viewport) return;
     const rect = viewport.getBoundingClientRect();
     const time = (event.clientX - rect.left + viewport.scrollLeft) / pxPerSecond;
+    console.log("[DEBUG] seekFromPointer CALLED, target=", (event.target as HTMLElement).className, "currentTarget=", (event.currentTarget as HTMLElement).className, "computed time=", time);
     setCurrentTime(Math.max(0, Math.min(duration, time)));
   }
 
@@ -205,6 +206,7 @@ export function Timeline({
   }
 
   function beginDrag(event: ReactPointerEvent, clip: TimelineItem, mode: DragMode) {
+    console.log("[DEBUG] beginDrag CALLED for clip", clip.id, "startSec=", clip.startSec, "mode=", mode);
     event.stopPropagation();
     const item = event.currentTarget.closest(".timeline-media-item") as HTMLElement | null;
     item?.setPointerCapture(event.pointerId);
@@ -224,6 +226,7 @@ export function Timeline({
 
   function updateDrag(event: ReactPointerEvent) {
     if (!drag) return;
+    console.log("[DEBUG] updateDrag CALLED for clip", drag.clipId, "clientX=", event.clientX, "pointerX(drag start)=", drag.pointerX);
     if (drag.mode === "move") {
       const viewport = viewportRef.current;
       const rect = viewport?.getBoundingClientRect();
@@ -286,6 +289,7 @@ export function Timeline({
 
   async function finishDrag(event: ReactPointerEvent) {
     if (!drag) return;
+    console.log("[DEBUG] finishDrag CALLED for clip", drag.clipId, "dragOutPending=", dragOutPending);
     event.currentTarget.releasePointerCapture(event.pointerId);
     const shouldDelete = dragOutPending;
     const draggedClipId = drag.clipId;

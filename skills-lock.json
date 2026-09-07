@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "design-principles": {
+      "source": "agusegui/dsgn-knldg",
+      "sourceType": "github",
+      "skillPath": "skills/design-principles/SKILL.md",
+      "computedHash": "7fb6b15e920a5f5b31527c3419d55290f0639ba1f7a713fd1c2736a51d7d2498"
+    }
+  }
+}

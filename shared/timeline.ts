@@ -103,7 +103,30 @@ export interface AudioItem extends TimelineItemBase {
   ducking?: { enabled?: boolean; duckDb?: number };
 }
 
-export type TimelineItem = VideoItem | ImageItem | TextItem | AudioItem;
+/** A nested composite: `children` render as their own local timeline (each
+ * child's startSec is relative to this group's startSec, not the project's),
+ * with the group's own transform/opacity applied on top of the whole
+ * composited result. Lets a multi-part creative -- a price pill behind a
+ * strikethrough price behind a new price -- move, scale, and fade as one
+ * unit instead of needing a bespoke TimelineItem variant per composite. */
+export interface GroupItem extends TimelineItemBase {
+  kind: "group";
+  children: TimelineItem[];
+}
+
+/** Arbitrary HTML/CSS painted into the frame, driven by the playhead --
+ * `template` selects a registered overlay component (see
+ * shared/overlays/registry.ts) and `props` are that template's own
+ * serializable input. This is the mechanism for fake-phone-UI mockups,
+ * price-drop badges, stat chips, and other "funnel ad" compositing that
+ * doesn't belong as a one-off hack bolted onto TextItem. */
+export interface HtmlOverlayItem extends TimelineItemBase {
+  kind: "htmlOverlay";
+  template: string;
+  props?: Record<string, unknown>;
+}
+
+export type TimelineItem = VideoItem | ImageItem | TextItem | AudioItem | GroupItem | HtmlOverlayItem;
 
 /** @deprecated pre-v2 shape. `normalizeProject` migrates every persisted
  * `Clip` into a `VideoItem` (the only kind that ever existed before v2) on

@@ -34,31 +34,31 @@ projectRenderRouter.post("/:id/render", async (req, res) => {
   // need to change.
   const resolveAssetUrl = (assetId: string) => `http://localhost:${port}/media/${assetId}/file`;
 
-  // The plan is derived straight from the project already sitting in the
-  // database -- the client no longer hand-assembles segments/cues/face
-  // points itself, so there is exactly one place a given project's render
-  // output can come from, and preview (once wired to the same plan) can never
-  // disagree with export about what a project actually contains.
-  const plan = buildRenderPlan(project, resolveAssetUrl, {
-    captionStyle: body.style,
-    width: body.width,
-    height: body.height,
-    fps: body.fps,
-  });
-
-  if (!plan.layers.length) {
-    res.status(400).json({ error: "Project has no timeline items to render" });
-    return;
-  }
-
-  const renderId = nanoid();
-  const outputPath = path.join(rendersDir, `${renderId}.mp4`);
-
   try {
+    // The plan is derived straight from the project already sitting in the
+    // database -- the client no longer hand-assembles segments/cues/face
+    // points itself, so there is exactly one place a given project's render
+    // output can come from, and preview (once wired to the same plan) can never
+    // disagree with export about what a project actually contains.
+    const plan = buildRenderPlan(project, resolveAssetUrl, {
+      captionStyle: body.style,
+      width: body.width,
+      height: body.height,
+      fps: body.fps,
+    });
+
+    if (!plan.layers.length) {
+      res.status(400).json({ error: "Project has no timeline items to render" });
+      return;
+    }
+
+    const renderId = nanoid();
+    const outputPath = path.join(rendersDir, `${renderId}.mp4`);
     await renderCaptionedVideo({ plan, outputPath });
     registerRender(renderId, project.id, outputPath);
     res.status(201).json({ renderId, downloadUrl: `/renders/${renderId}/file` });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: error instanceof Error ? error.message : "Render failed" });
   }
 });
