@@ -1,98 +1,119 @@
-# vinext-starter
+# Clipwire
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+An editor-first workspace for turning long-form footage into short-form video. Upload a recording, let AI find the moments worth clipping, then cut, caption, reframe, and export polished vertical clips from a timeline you control.
 
-## Prerequisites
+Clipwire is built for a fast loop: import once, generate candidates, pick the ones that work, and refine them in a real editor rather than a black-box "auto clip" button.
 
-- Node.js `>=22.13.0`
+## What it does
 
-## Quick Start
+- **Moment finding.** Transcribes your source video with word-level timestamps, then asks Claude to propose clip candidates. Each candidate has a hook-style title, a rationale, a score broken down into hook, self-containment, payoff, and clean cut, and one or more source ranges to stitch together.
+- **Clip types.** Ask for the best moments overall, or target hot takes, educational segments, stories, hooks, or product mentions.
+- **Timeline editor.** Multi-track timeline with video, caption, B-roll, audio, and elements tracks. Trim, split, reposition, scale, and layer items. Group items into composites that move and fade as one unit.
+- **Styled captions.** Eight caption presets (Beasty, Mozi, Deep Diver, Popline, Karaoke, Simple, Pod P, Think Media) with word-level animation driven by the transcript, plus accent-color overrides.
+- **Auto reframe.** Local MediaPipe face and body tracking turns 16:9 footage into a 9:16 crop that follows the speaker, with offline smoothing, dead zones, and a two-shot fallback. Focus, split, and gameplay layouts.
+- **Generated assets.** AI voiceover and AI still images (B-roll, product shots, backgrounds) enter the same asset system as uploaded media, with provenance recorded on the asset. Identical generation requests are cached and never re-billed.
+- **HTML overlays.** Playhead-driven overlay templates painted into the frame, such as a phone notification or a price badge. Adding a template is one component plus one registry entry.
+- **Export formats.** 9:16 for Shorts, Reels, and TikTok; 1:1 for feed posts; 4:5 for Instagram portrait; 16:9 for YouTube.
+- **One render pipeline.** A project compiles to a deterministic render plan. The same plan drives the live in-browser preview and the server-side H.264 export, so what you see is what you get.
+
+## Architecture
+
+```
+app/          Next.js editor UI, served by vinext on Cloudflare Workers
+shared/       Timeline model, render plan, caption cues, overlays, timeline math
+sidecar/      Local Express service: storage, transcription, AI, face tracking, rendering
+worker/       Cloudflare Worker entry point
+tests/        Timeline math and rendered-HTML tests
+```
+
+The **editor** is a Next.js app that runs on Cloudflare via vinext. It talks to a **sidecar** running on your machine, which owns the SQLite database, media files, and everything that needs ffmpeg, Python, or an API key.
+
+The **shared** package is the contract between them. A `Project` holds tracks, media assets, transcripts, and face tracks. `buildRenderPlan` turns a project into a pure `RenderPlan` with a stable hash. The Remotion composition in `shared/RenderPlanComposition.tsx` renders that plan both in the browser player and in the sidecar's headless renderer.
+
+### Sidecar endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET/POST` | `/projects` | List and create projects |
+| `GET/PUT` | `/projects/:id` | Load and save a project timeline |
+| `POST` | `/projects/:id/media` | Upload a media file |
+| `POST` | `/projects/:id/transcribe` | Word-level transcription via Whisper |
+| `POST` | `/projects/:id/find-moments` | Propose clip candidates via Claude |
+| `POST` | `/projects/:id/track-faces` | Run local face tracking |
+| `POST` | `/projects/:id/generate/voice` | AI voiceover |
+| `POST` | `/projects/:id/generate/image` | AI still image |
+| `POST` | `/projects/:id/render` | Render the project to H.264 |
+| `GET` | `/media/:mediaId/file` | Serve an uploaded or generated asset |
+| `GET` | `/renders/:id/file` | Download a finished render |
+
+## Requirements
+
+- Node.js 22.13 or newer
+- `ffmpeg` and `ffprobe` on your PATH
+- An OpenAI API key for transcription, voiceover, and image generation
+- An Anthropic API key for moment finding
+- Python 3.12, only if you want face tracking
+
+## Getting started
+
+Install dependencies for the editor and the sidecar:
 
 ```bash
 npm install
+cd sidecar && npm install && cd ..
+```
+
+Configure the sidecar:
+
+```bash
+cp sidecar/.env.example sidecar/.env
+```
+
+Fill in `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. The sidecar loads this file on start.
+
+Optionally set up face tracking. This creates a virtualenv and downloads the MediaPipe models:
+
+```bash
+cd sidecar && npm run facetrack:setup
+```
+
+Run the sidecar and the editor in two terminals:
+
+```bash
+cd sidecar && npm run dev
+```
+
+```bash
 npm run dev
-npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+The editor expects the sidecar at `http://localhost:4310`. Override with `NEXT_PUBLIC_SIDECAR_URL` if you run it elsewhere.
 
-## Included Shape
+## Scripts
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+Editor, from the repo root:
 
-## Workspace Auth Headers
+| Script | What it does |
+| --- | --- |
+| `npm run dev` | Start the editor with hot reload |
+| `npm run build` | Production build |
+| `npm run test` | Build, then run rendered-HTML tests |
+| `npm run test:timeline` | Timeline math unit tests |
+| `npm run lint` | ESLint |
 
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
+Sidecar, from `sidecar/`:
 
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
+| Script | What it does |
+| --- | --- |
+| `npm run dev` | Start the sidecar with file watching |
+| `npm run test` | Sidecar tests, including subprocess hardening |
+| `npm run facetrack:setup` | Create the Python venv and fetch models |
+| `npm run facetrack:test` | Face-tracking unit tests, no inference |
 
-Treat the full name as optional and fall back to email when it is absent:
+## Data and storage
 
-```tsx
-import { headers } from "next/headers";
+Projects are stored as JSON in a SQLite database under `sidecar/storage/`, alongside uploaded media and finished renders. That folder is ignored by git. Every project is normalized on read, so older project files keep loading as the schema evolves.
 
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
+## Status
 
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+Clipwire is a personal tool under active development. The timeline model, render plan, and caption system are stable. AI video generation is stubbed and returns a clear error until a general-purpose video API is available.
